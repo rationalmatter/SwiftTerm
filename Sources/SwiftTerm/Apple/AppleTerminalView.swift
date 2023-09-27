@@ -131,6 +131,7 @@ extension TerminalView {
             search.invalidate ()
             
             terminalDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
+            updateScroller()
             return true
         }
         return false
