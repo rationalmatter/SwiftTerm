@@ -1191,9 +1191,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     func ensureCaretIsVisible ()
     {
-        contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
+        contentOffset.y = CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height
     }
-    
 
     open func deleteBackward() {
         self.send ([0x7f])
