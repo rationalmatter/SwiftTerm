@@ -52,7 +52,7 @@ extension TerminalView {
     {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
-        let newCols = Int(frame.width / cellDimension.width)
+        let newCols = Int(visibleContentSize.width / cellDimension.width)
         let newRows = Int(frame.height / cellDimension.height)
         resize(cols: newCols, rows: newRows)
         updateCaretView()
@@ -671,7 +671,7 @@ extension TerminalView {
                     #endif
 
                     if col + runGlyphsCount >= terminal.cols {
-                        size.width += frame.width - size.width
+                        size.width += (visibleContentSize.width - CGFloat(terminal.cols) * cellDimension.width)
                     }
 
                     let rect = CGRect (origin: origin, size: size)
@@ -1181,7 +1181,7 @@ extension TerminalView {
         }
         
         let image = TTImage (cgImage: cgimage, size: CGSize (width: width, height: height))
-        insertImage (image, width: CGFloat (width) > frame.width ? .percent(100) : .auto, height: .auto, preserveAspectRatio: true)
+        insertImage (image, width: CGFloat (width) > visibleContentSize.width ? .percent(100) : .auto, height: .auto, preserveAspectRatio: true)
     }
    
     public func createImage (source: Terminal, data: Data, width widthRequest: ImageSizeRequest, height heightRequest: ImageSizeRequest, preserveAspectRatio: Bool)
@@ -1217,7 +1217,7 @@ extension TerminalView {
             }
         }
         
-        var width = getPixels (fromDim: widthRequest, regionSize: frame.width, imageSize: img.size.width, cellSize: cellDimension.width)
+        var width = getPixels (fromDim: widthRequest, regionSize: visibleContentSize.width, imageSize: img.size.width, cellSize: cellDimension.width)
         var height = getPixels (fromDim: heightRequest, regionSize: frame.height, imageSize: img.size.height, cellSize: cellDimension.height)
         
         if preserveAspectRatio {

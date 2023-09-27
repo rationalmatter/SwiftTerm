@@ -361,10 +361,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func makeContextMenuRegionForTap (point: CGPoint) -> CGRect {
         CGRect (origin: point, size: CGSize (width: cellDimension.width, height: cellDimension.height))
     }
-                    
+
+    /// Size of the content currently on screen, considering safe area and content insets.
+    var visibleContentSize: CGSize {
+        return CGSize(width: frame.inset(by: adjustedContentInset).width, height: frame.inset(by: safeAreaInsets).height)
+    }
+
     func makeContextMenuRegionForSelection () -> CGRect {
-        let width = selection.isMultiLine ? frame.width : CGFloat(selection.end.col-selection.start.col)*cellDimension.width
-        
+        let width = selection.isMultiLine ? visibleContentSize.width : CGFloat(selection.end.col-selection.start.col)*cellDimension.width
+
         return CGRect (x: CGFloat (selection.start.col)*cellDimension.width,
                        y: CGFloat (selection.start.row)*cellDimension.height,
                        width: width,
@@ -405,7 +410,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if row < 0 {
             return (Position(col: 0, row: 0), toInt (point))
         }
-        return (Position(col: min (max (0, col), terminal.cols-1), row: row), toInt (point))
+        return (Position(col: min (max (0, col), terminal.cols-1), row: min (row, terminal.buffer.lines.count-1)), toInt (point))
     }
 
     func encodeFlags (release: Bool) -> Int
@@ -665,10 +670,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 stopSelectionTimer()
                 selection.pivotExtend(bufferPosition: hit)
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
-                if absoluteY < 0 || absoluteY > bounds.height {
+                // Scroll to the touch area if it was dragged off screen
+                let minY = safeAreaInsets.top
+                let maxY = minY + visibleContentSize.height
+                if absoluteY < minY || absoluteY > maxY {
                     startSelectionTimer {
-                        let newPlace = CGRect (x: 0, y: max (0, self.contentOffset.y+absoluteY), width: self.bounds.width, height: self.bounds.height)
-                        self.scrollRectToVisible(newPlace, animated: true)
+                        var newContentOffset = self.contentOffset
+                        if absoluteY < minY {
+                            let topContentOffsetY = -self.adjustedContentInset.top
+                            newContentOffset.y = max(topContentOffsetY, newContentOffset.y + (absoluteY - minY))
+                        }
+                        else if absoluteY > maxY {
+                            let bottomContentOffsetY = self.contentSize.height - self.bounds.height + self.adjustedContentInset.bottom
+                            newContentOffset.y = min(bottomContentOffsetY, newContentOffset.y + (absoluteY - maxY))
+                        }
+                        self.setContentOffset(newContentOffset, animated: true)
                     }
                 }
                 setNeedsDisplay()
@@ -854,7 +870,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     func setupOptions ()
     {
-        setupOptions(width: bounds.width, height: bounds.height)
+        setupOptions(width: visibleContentSize.width, height: visibleContentSize.height)
         layer.backgroundColor = nativeBackgroundColor.cgColor
         nativeBackgroundColor = UIColor.clear
     }
@@ -1022,8 +1038,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         contentSize = CGSize (width: CGFloat (terminal.buffer.cols) * cellDimension.width,
                               height: CGFloat (terminal.buffer.lines.count) * cellDimension.height)
-        //contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
-        contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
+        ensureCaretIsVisible()
         //Xscroller.doubleValue = scrollPosition
         //Xscroller.knobProportion = scrollThumbsize
     }
@@ -1071,7 +1086,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if cellDimension == nil {
                 return
             }
-            processSizeChange(newSize: newValue.size)
+            processSizeChange(newSize: visibleContentSize)
             setNeedsDisplay (bounds)
         }
     }
@@ -1085,7 +1100,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if cellDimension == nil {
                 return
             }
-            processSizeChange(newSize: newValue.size)
+            processSizeChange(newSize: visibleContentSize)
             setNeedsDisplay (bounds)
             updateCursorPosition()
         }
