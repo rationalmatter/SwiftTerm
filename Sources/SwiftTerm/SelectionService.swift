@@ -214,7 +214,8 @@ class SelectionService: CustomDebugStringConvertible {
         switch Position.compare (bufferPosition, pivot) {
         case .after:
             start = pivot
-            end = bufferPosition
+            // Set end to col + 1, otherwise it would be impossible to select the last character in a row
+            end = Position(col: bufferPosition.col + 1, row: bufferPosition.row)
         case .before:
             start = bufferPosition
             end = pivot
