@@ -516,7 +516,26 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             queuePendingDisplay()
         }
     }
-    
+
+    @objc func tripleTap (_ gestureRecognizer: UITapGestureRecognizer)
+    {
+        guard gestureRecognizer.view != nil, gestureRecognizer.state == .ended else { return }
+
+        if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+            sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
+            if terminal.mouseMode.sendButtonRelease() {
+                sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
+            }
+            return
+        } else {
+            let hit = calculateTapHit(gesture: gestureRecognizer).grid
+            selection.selectAll()
+            enableSelectionPanGesture()
+            showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
+            queuePendingDisplay()
+        }
+    }
+
     var directionView: UIView?
     var directionCount: Int = 0
     var lastCursorImage: String? = nil
@@ -764,7 +783,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
 
+        let tripleTap = UITapGestureRecognizer (target: self, action: #selector(tripleTap(_:)))
+        tripleTap.numberOfTapsRequired = 3
+        addGestureRecognizer(tripleTap)
+
         singleTap.require(toFail: doubleTap)
+        doubleTap.require(toFail: tripleTap)
     }
     
     var _inputAccessory: UIView?
