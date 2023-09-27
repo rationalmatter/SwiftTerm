@@ -317,7 +317,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case #selector(copy(_:)):
             return selection.active
         case #selector(paste(_:)):
-            return true
+            return isInputEnabled
         case #selector(select(_:)):
             return !selection.active
         case #selector(selectAll(_:)):
@@ -452,19 +452,34 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
                 }
             } else {
-                if selection.active {
+                // Flag indicating whether something was selected before the tap
+                let hasSelection = selection.active
+                // Flag indicating whether context menu was visible before the tap
+                let isMenuVisible = UIMenuController.shared.isMenuVisible
+                // Tap location in view
+                let tapLoc = gestureRecognizer.location(in: gestureRecognizer.view)
+                // Tap position in buffer
+                let tapBufferPos = calculateTapHit(gesture: gestureRecognizer).grid
+                let cursorRow = terminal.buffer.y+terminal.buffer.yDisp
+                // Flag indicating whether it was the cursor that received the tap
+                let didTapCursor = abs (tapBufferPos.col-terminal.buffer.x) < 4 && abs (tapBufferPos.row - cursorRow) < 2
+                // If something was selected, clear selection
+                if hasSelection {
                     selection.selectNone()
                     disableSelectionPanGesture()
                 }
-                if UIMenuController.shared.isMenuVisible {
+                // If context menu was visible, hide it
+                if isMenuVisible {
                     UIMenuController.shared.hideMenu()
-                } else {
-                    let location = gestureRecognizer.location(in: gestureRecognizer.view)
-                    let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
-                    let cursorRow = terminal.buffer.y+terminal.buffer.yDisp
-                    if abs (tapLoc.col-terminal.buffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
-                        showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
-                    }
+                }
+                // If context menu was not visible, but the tap was in the cursor area, show context menu
+                else if didTapCursor {
+                    showContextMenu (forRegion: makeContextMenuRegionForTap (point: tapLoc), pos: tapBufferPos)
+                }
+                // If there was nothing to clear or dismiss, and it wasn't the cursor that was tapped...
+                if !hasSelection && !isMenuVisible && !didTapCursor && toggleKeyboardOnTap {
+                    // ...Toggle keyboard
+                    toggleKeyboard()
                 }
             }
             queuePendingDisplay()
@@ -732,17 +747,75 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let doubleTap = UITapGestureRecognizer (target: self, action: #selector(doubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
+
+        singleTap.require(toFail: doubleTap)
     }
     
     var _inputAccessory: UIView?
     var _inputView: UIView?
-    
+    /// Indicates whether the view is actually accepting input, to handle cases where it's a first responder, but isn't showing the keyboard.
+    private var isAcceptingInput: Bool = true
+    /// The view we return as `inputView` when `self` is a first responder, but is not actually accepting input.
+    private var _noInputView = UIView(frame: .zero)
+    /// When set to `true`, the cursor will automatically hide when the terminal view is not accepting input. Defaults to `false`.
+    public var hideCursorWhenNotAcceptingInput = false {
+        didSet {
+            updateCursorVisibility()
+        }
+    }
+    /// Enables tapping in the terminal area to dismiss the keyboard. Defaults to `false`.
+    public var toggleKeyboardOnTap = false
+    /// Enables or disables input in the terminal view. When input is disabled, the view still allows selection, for example. Defaults to `true`.
+    public var isInputEnabled: Bool = true {
+        didSet {
+            if isAcceptingInput {
+                stopAcceptingInput()
+            }
+        }
+    }
+
+    /// Reloads input views, showing the keyboard if the terminal view is the first responder.
+    private func startAcceptingInput() {
+        guard isInputEnabled else { return }
+
+        isAcceptingInput = true
+        reloadInputViews()
+        updateCursorVisibility()
+    }
+
+    /// Reloads input views, hiding the keyboard, even if the terminal view is the first responder.
+    private func stopAcceptingInput() {
+        isAcceptingInput = false
+        reloadInputViews()
+        updateCursorVisibility()
+    }
+
+    private func toggleKeyboard() {
+        if isAcceptingInput {
+            stopAcceptingInput()
+        }
+        else if isInputEnabled {
+            startAcceptingInput()
+        }
+    }
+
+    private func updateCursorVisibility() {
+        switch (isInputEnabled && isAcceptingInput && isFirstResponder, hideCursorWhenNotAcceptingInput) {
+        case (true, _):
+            getTerminal().showCursor()
+        case (false, true):
+            getTerminal().hideCursor()
+        case (false, false):
+            getTerminal().showCursor()
+        }
+    }
+
     ///
     /// You can set this property to a UIView to be your input accessory, by default
     /// this is an instance of `TerminalAccessory`
     ///
     public override var inputAccessoryView: UIView? {
-        get { _inputAccessory }
+        get { (isInputEnabled && isAcceptingInput) ? _inputAccessory : nil }
         set {
             _inputAccessory = newValue
         }
@@ -753,7 +826,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// this is an instance of `TerminalAccessory`
     ///
     public override var inputView: UIView? {
-        get { _inputView }
+        get { (isInputEnabled && isAcceptingInput) ? _inputView : _noInputView }
         set {
             _inputView = newValue
         }
@@ -1055,6 +1128,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     open func insertText(_ text: String) {
+        guard isAcceptingInput else { return }
+
         let sendData = applyTextToInput (text)
         
         if sendData == "" {
@@ -1131,6 +1206,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let response = super.becomeFirstResponder()
         if response {
             caretView?.updateCursorStyle()
+            updateCursorVisibility()
         }
         return response
     }
@@ -1145,6 +1221,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             keyRepeat = nil
             
             terminalAccessory?.cancelTimer()
+            updateCursorVisibility()
         }
         return code
     }
