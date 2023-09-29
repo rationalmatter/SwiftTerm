@@ -364,7 +364,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     /// Size of the content currently on screen, considering safe area and content insets.
     var visibleContentSize: CGSize {
-        return CGSize(width: frame.inset(by: adjustedContentInset).width, height: frame.inset(by: safeAreaInsets).height)
+        frame.inset(by: adjustedContentInset).size
     }
 
     func makeContextMenuRegionForSelection () -> CGRect {
@@ -691,7 +691,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
                 // Scroll to the touch area if it was dragged off screen
                 let minY = safeAreaInsets.top
-                let maxY = minY + visibleContentSize.height
+                let maxY = frame.height - safeAreaInsets.bottom
                 if absoluteY < minY || absoluteY > maxY {
                     startSelectionTimer {
                         var newContentOffset = self.contentOffset
@@ -1191,7 +1191,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     func ensureCaretIsVisible ()
     {
-        contentOffset.y = CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height
+        contentOffset.y = CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height - adjustedContentInset.top
     }
 
     open func deleteBackward() {
