@@ -304,6 +304,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         lastLongSelect = nil
     }
     
+    public func resetToInitialState() {
+        resetCmd(nil)
+        updateScroller()
+    }
+
     @objc func resetCmd(_ sender: Any?) {
         terminal.cmdReset()
         selection.selectNone()
