@@ -184,6 +184,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     var fontSet: FontSet
     
+    var terminalOptions: TerminalOptions = .default
+
     /// The font to use to render the terminal, this attempts to derive the bold, italic and italic/bold variants from
     /// the original font, using the iOS UIFontDescriptor APIs.   For full control use the `setFonts(normal:bold:italic:boldItalic)`
     /// API instead
@@ -210,8 +212,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         selectNone ()
     }
     
-    public init(frame: CGRect, font: UIFont?) {
+    public init(frame: CGRect, font: UIFont?, options: TerminalOptions = .default) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.terminalOptions = options
         super.init (frame: frame)
         setup()
     }

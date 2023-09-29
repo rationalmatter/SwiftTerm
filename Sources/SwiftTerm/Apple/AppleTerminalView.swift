@@ -77,9 +77,9 @@ extension TerminalView {
         // Get the ascent + descent + leading from the font, already scaled for the font's size
         self.cellDimension = computeFontDimensions ()
         
-        let terminalOptions = TerminalOptions(cols: Int(width / cellDimension.width),
-                                              rows: Int(height / cellDimension.height))
-        
+        terminalOptions.cols = Int(width / cellDimension.width)
+        terminalOptions.rows = Int(height / cellDimension.height)
+
         if terminal == nil {
             terminal = Terminal(delegate: self, options: terminalOptions)
         } else {
