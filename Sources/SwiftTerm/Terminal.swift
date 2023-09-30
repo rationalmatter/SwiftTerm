@@ -1319,7 +1319,7 @@ open class Terminal {
             buffer.x = 0
             if wraparound && softWraparoundForCarriageReturn {
                 // Move the cursor to the beginning of the original, non-wrapped line
-                while (buffer.lines[buffer.y].isWrapped && buffer.y > 0) {
+                while (buffer.lines[buffer.y + buffer.yBase].isWrapped && buffer.y > 0) {
                     buffer.y -= 1
                 }
             }
