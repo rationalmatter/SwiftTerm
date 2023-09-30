@@ -140,6 +140,24 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             caretView?.tracksFocus = newValue
         }
     }
+    /// When set to `true`, *and* with wraparound enabled, terminal will handle the carriage return command by moving the cursor to the beginning of the original non-wrapped line (instead of the beginning of the wrapped line).
+    public var softWraparoundForCarriageReturn: Bool {
+        get {
+            terminal.softWraparoundForCarriageReturn
+        }
+        set {
+            terminal.softWraparoundForCarriageReturn = newValue
+        }
+    }
+    /// Enables reflow wrapping adjustments for lines with cursor, instead of letting the program handle them.
+    public var reflowWrappedLinesWithCursor: Bool {
+        get {
+            terminal.reflowWrappedLinesWithCursor
+        }
+        set {
+            terminal.reflowWrappedLinesWithCursor = newValue
+        }
+    }
     var accessibility: AccessibilityService = AccessibilityService()
     var search: SearchService!
     var debug: UIView?

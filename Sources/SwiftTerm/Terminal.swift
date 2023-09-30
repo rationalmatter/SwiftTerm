@@ -298,6 +298,11 @@ open class Terminal {
     
     var insertMode: Bool = false
     
+    /// When set to `true`, *and* with wraparound enabled, terminal will handle the carriage return command by moving the cursor to the beginning of the original non-wrapped line (instead of the beginning of the wrapped line). This value is ignored in margin mode.
+    var softWraparoundForCarriageReturn: Bool = false
+    /// Enables reflow wrapping adjustments for lines with cursor, instead of letting the program handle them.
+    var reflowWrappedLinesWithCursor: Bool = false
+
     /// Indicates that the application has toggled bracketed paste mode, which means that when content is pasted into
     /// the terminal, the content will be wrapped in "ESC [ 200 ~" to start, and "ESC [ 201 ~" to end.
     public private(set) var bracketedPasteMode: Bool = false
@@ -1312,6 +1317,12 @@ open class Terminal {
             }
         } else {
             buffer.x = 0
+            if wraparound && softWraparoundForCarriageReturn {
+                // Move the cursor to the beginning of the original, non-wrapped line
+                while (buffer.lines[buffer.y].isWrapped && buffer.y > 0) {
+                    buffer.y -= 1
+                }
+            }
         }
     }
     
