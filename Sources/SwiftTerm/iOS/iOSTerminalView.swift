@@ -820,15 +820,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var _inputAccessory: UIView?
     var _inputView: UIView?
     /// Indicates whether the view is actually accepting input, to handle cases where it's a first responder, but isn't showing the keyboard.
-    private var isAcceptingInput: Bool = true
+    var isAcceptingInput: Bool = true
     /// The view we return as `inputView` when `self` is a first responder, but is not actually accepting input.
     private var _noInputView = UIView(frame: .zero)
-    /// When set to `true`, the cursor will automatically hide when the terminal view is not accepting input. Defaults to `false`.
-    public var hideCursorWhenNotAcceptingInput = false {
-        didSet {
-            updateCursorVisibility()
-        }
-    }
     /// Enables tapping in the terminal area to dismiss the keyboard. Defaults to `false`.
     public var toggleKeyboardOnTap = false
     /// Enables or disables input in the terminal view. When input is disabled, the view still allows selection, for example. Defaults to `true`.
@@ -837,7 +831,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if isAcceptingInput {
                 stopAcceptingInput()
             }
+            updateCursorVisibility()
         }
+    }
+
+    public func showKeyboard() {
+        _ = becomeFirstResponder()
+        startAcceptingInput()
     }
 
     /// Reloads input views, showing the keyboard if the terminal view is the first responder.
@@ -866,13 +866,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     private func updateCursorVisibility() {
-        switch (isInputEnabled && isAcceptingInput && isFirstResponder, hideCursorWhenNotAcceptingInput) {
-        case (true, _):
-            getTerminal().showCursor()
-        case (false, true):
+        switch (isInputEnabled, isAcceptingInput && isFirstResponder) {
+        case (false, _):
             getTerminal().hideCursor()
-        case (false, false):
+        case (true, true):
             getTerminal().showCursor()
+            caretView?.updateCursorStyle()
+        case (true, false):
+            getTerminal().showCursor()
+            caretView?.disableAnimations()
+            caretView?.updateView()
         }
     }
 

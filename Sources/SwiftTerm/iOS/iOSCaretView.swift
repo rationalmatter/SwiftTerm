@@ -119,6 +119,12 @@ class CaretView: UIView {
         setNeedsDisplay()
     }
 
+    private var hasFocus: Bool {
+        guard let terminalView = superview as? TerminalView else { return true }
+
+        return terminalView.isInputEnabled && terminalView.isAcceptingInput && terminalView.isFirstResponder
+    }
+
     override public func draw (_ dirtyRect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext () else {
             return
@@ -126,7 +132,7 @@ class CaretView: UIView {
         context.scaleBy (x: 1, y: -1)
         context.translateBy(x: 0, y: -frame.height)
 
-        drawCursor(in: context, hasFocus: tracksFocus ? (superview?.isFirstResponder ?? true) : true)
+        drawCursor(in: context, hasFocus: tracksFocus && hasFocus)
     }
 
 }
