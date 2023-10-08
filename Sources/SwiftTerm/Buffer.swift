@@ -796,7 +796,7 @@ public class Buffer {
             // wrapped lines with the cursor
             let absoluteY = yBase + self.y
 
-            if absoluteY >= y && absoluteY < y + wrappedLines.count {
+            if absoluteY >= y && absoluteY < y + wrappedLines.count  && !terminal.reflowWrappedLinesWithCursor {
                 continue
             }
 
