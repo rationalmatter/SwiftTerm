@@ -158,6 +158,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             terminal.reflowWrappedLinesWithCursor = newValue
         }
     }
+    /// Enables or disables Reset context menu item.
+    public var allowsResettingViaContextMenu: Bool = true
     var accessibility: AccessibilityService = AccessibilityService()
     var search: SearchService!
     var debug: UIView?
@@ -344,7 +346,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case #selector(selectAll(_:)):
             return true
         case #selector(resetCmd(_:)):
-            return true
+            return allowsResettingViaContextMenu
         default:
             //print ("canPerformAction invoked for \(action)")
             return false
