@@ -1176,7 +1176,7 @@ open class Terminal {
                     // The line already exists (eg. the initial viewport), mark it as a
                     // wrapped line
                     buffer.y += 1
-                    buffer.lines [buffer.y].isWrapped = true
+                    buffer.lines [buffer.y + buffer.yBase].isWrapped = true
                 }
                 // row changed, get it again
                 bufferRow = buffer.lines [buffer.y + buffer.yBase]
