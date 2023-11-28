@@ -349,7 +349,7 @@ extension TerminalView: UITextInput {
             }
             send (data)
         }
-        if terminal.buffers.isAlternateBuffer {
+        if terminal.buffers.isAlternateBuffer || allowFloatingCursorUpDownArrowKeyEvents {
             let deltay = lastPosition.y - point.y
 
             var data: [UInt8]

@@ -159,7 +159,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     /// Enables or disables Reset context menu item.
-    public var allowsResettingViaContextMenu: Bool = true
+    public var allowResettingViaContextMenu: Bool = true
+    /// Enables or disables floating cursor sending up and down arrow events.
+    public var allowFloatingCursorUpDownArrowKeyEvents: Bool = false
     var accessibility: AccessibilityService = AccessibilityService()
     var search: SearchService!
     var debug: UIView?
@@ -346,7 +348,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case #selector(selectAll(_:)):
             return true
         case #selector(resetCmd(_:)):
-            return allowsResettingViaContextMenu
+            return allowResettingViaContextMenu
         default:
             //print ("canPerformAction invoked for \(action)")
             return false
