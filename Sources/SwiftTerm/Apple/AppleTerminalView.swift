@@ -376,6 +376,8 @@ extension TerminalView {
         var hasUrl = false
         
         var str = prefix
+        var lastIsPlain = true
+
         for col in 0..<cols {
             let ch: CharData = line[col]
             if col == 0 {
@@ -396,7 +398,20 @@ extension TerminalView {
                     hasUrl = chhas
                 }
             }
-            str.append(ch.code == 0 ? " " : ch.getCharacter ())
+            str.append(ch.code == 0 && lastIsPlain ? " " : ch.getCharacter ())
+
+            // Catches asian languages and emoji, and we trigger the slow path
+            // extract this from the unicode table, or vim that already contains
+            // the double-width and known-to-be-double-width emoji in src/mbyte.c
+            if ch.code > 0x1100 {
+                if let p = ch.getCharacter().unicodeScalars.first?.properties {
+                    lastIsPlain = !p.isEmoji
+                } else {
+                    lastIsPlain = true
+                }
+            } else {
+                lastIsPlain = true
+            }
         }
         res.append (NSAttributedString(string: str, attributes: getAttributes(attr, withUrl: hasUrl)))
         updateSelectionAttributesIfNeeded(attributedLine: res, row: row, cols: cols)
@@ -535,7 +550,12 @@ extension TerminalView {
         currentContext.restoreGState()
     }
 
-    
+    func getLineData (forRow: Int) -> (ViewLineInfo, CTLine) {
+        let line = terminal.buffer.lines [forRow]
+        let lineInfo = buildAttributedString(row: forRow, line: line, cols: terminal.cols)
+        return (lineInfo, CTLineCreateWithAttributedString(lineInfo.attrStr))
+    }
+
     // TODO: this should not render any lines outside the dirtyRect
     func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
     {
@@ -621,11 +641,21 @@ extension TerminalView {
                 continue
             } 
             #endif
-            let line = terminal.buffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: terminal.cols)
-            let ctline = CTLineCreateWithAttributedString(lineInfo.attrStr)
+            let (lineInfo, ctline) = getLineData(forRow: row)
 
             var col = 0
+            var debug = false
+            if terminal.buffer.y == 1 {
+                debug = true
+                print ("CTLine is: \(ctline)")
+                let x = CTLineGetGlyphRuns(ctline) as? [CTRun] ?? []
+                print ("GlyphRunCount: \(x.count)")
+                for y in 0..<x.count {
+                    print ("Run \(y): \(x [y])")
+                }
+            } else {
+                debug = false
+            }
             for run in CTLineGetGlyphRuns(ctline) as? [CTRun] ?? [] {
                 let runGlyphsCount = CTRunGetGlyphCount(run)
                 let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
@@ -635,11 +665,17 @@ extension TerminalView {
                     CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
                     count = runGlyphsCount
                 }
-
-                var positions = runGlyphs.enumerated().map { (i: Int, glyph: CGGlyph) -> CGPoint in
-                    CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(col + i)), y: lineOrigin.y + yOffset)
+                let runPositions = [CGPoint](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
+                    CTRunGetPositions(run, CFRange(), bufferPointer.baseAddress!)
+                    count = runGlyphsCount
                 }
-
+                var positions = runGlyphs.enumerated().map { (i: Int, glyph: CGGlyph) -> CGPoint in
+                    CGPoint(x: lineOrigin.x + runPositions [i].x, y: lineOrigin.y + yOffset)
+                }
+                var advances = [CGSize](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
+                    CTRunGetAdvances(run, CFRange(), bufferPointer.baseAddress!)
+                    count = runGlyphsCount
+                }
                 var backgroundColor: TTColor?
                 if runAttributes.keys.contains(.selectionBackgroundColor) {
                     backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
@@ -851,7 +887,31 @@ extension TerminalView {
             #endif
         }
     }
-    
+
+    /// Given a column and a CTLine that we have produced for a line, compute the
+    /// x position for the column to position the cursor.   This takes into account the
+    /// composed text from CoreText, instead of assuming that every character uses one cell
+    ///
+    func computeX (forColumn: Int, on ctline: CTLine) -> CGFloat {
+        var col = 0
+
+        for run in CTLineGetGlyphRuns(ctline) as? [CTRun] ?? [] {
+            let runGlyphsCount = CTRunGetGlyphCount(run)
+            let endCol = col + runGlyphsCount
+            defer { col = endCol }
+
+            if forColumn > endCol {
+                continue
+            }
+            let runPositions = [CGPoint](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
+                CTRunGetPositions(run, CFRange(), bufferPointer.baseAddress!)
+                count = runGlyphsCount
+            }
+            return runPositions [forColumn-col].x
+        }
+        return 0
+    }
+
     func updateCursorPosition()
     {
         guard let caretView else { return }
@@ -874,7 +934,12 @@ extension TerminalView {
         let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
+        print ("Target column is: \(buffer.x)")
+        let (_, ctline) = getLineData(forRow: vy)
+        caretView.frame.origin = CGPoint(
+            x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)),
+            y: lineOrigin.y
+        )
         caretView.setText (ch: buffer.lines [vy][buffer.x])
     }
     
