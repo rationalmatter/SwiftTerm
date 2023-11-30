@@ -60,8 +60,8 @@ extension TerminalView: UITextInput {
     }
 
     public func text(in range: UITextRange) -> String? {
-        let r = range as! xTextRange
-        
+        guard let r = range as? xTextRange else { return "" }
+
         if textInputStorage.count >= max (r._start, r._end) {
             let res = String (textInputStorage [r._start..<r._end])
             
