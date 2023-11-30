@@ -17,6 +17,12 @@ public extension TerminalView {
         resetCmd(nil)
         updateScroller()
     }
+
+    func getText() -> String {
+        let start = Position(col: 0, row: 0)
+        let end = Position(col: terminal.cols - 1, row: terminal.buffer.lines.maxLength - 1)
+        return terminal.getText(start: start, end: end)
+    }
 }
 
 public extension Terminal {
