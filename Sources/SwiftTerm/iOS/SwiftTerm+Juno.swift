@@ -79,8 +79,8 @@ public extension Terminal {
 
     /// Calculates wraparound-invariant position in buffer — that is, position as if there was no wrapping, and every line had as many columns as it needed — based on a position in buffer with wrapped lines. Both positions are scroll-invariant, i.e. counting from the beginning of buffer, not from the first visible row.
     func getWraparoundInvariantPosition(forBufferPosition position: Position) -> Position? {
-        guard position.row > 0 && position.row < buffer.lines.count else { return nil }
         guard position.row != 0 else { return position }
+        guard position.row > 0 && position.row < buffer.lines.count else { return nil }
 
         var currentWraparoundInvariantRow = 0
         var currentWrappedRows = 0
