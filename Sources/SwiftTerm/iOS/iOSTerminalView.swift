@@ -1395,7 +1395,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     func getEffectiveWidth (size: CGSize) -> CGFloat
     {
-        return size.width
+        return frame.inset(by: adjustedContentInset).width
     }
     
     func updateDebugDisplay ()
@@ -1466,10 +1466,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let displayBuffer = terminal.displayBuffer
         contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
                               height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
-        //contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        //Xscroller.doubleValue = scrollPosition
-        //Xscroller.knobProportion = scrollThumbsize
+        ensureCaretIsVisible()
     }
 
 #if canImport(MetalKit)
@@ -2211,8 +2208,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         // Suppress during sync blocks and inter-block gaps.
         guard !terminal.synchronizedOutputActive && !inSyncSequence else { return }
-        let displayBuffer = terminal.displayBuffer
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
+        let maxY = contentSize.height - bounds.height + adjustedContentInset.bottom
+        contentOffset = CGPoint(x: contentOffset.x, y: max(-adjustedContentInset.top, maxY))
     }
     
     public func deleteBackward() {
