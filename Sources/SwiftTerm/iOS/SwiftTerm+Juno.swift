@@ -32,15 +32,16 @@ public extension Terminal {
     /// Retrieves contents of the line starting at the given scroll-invariant position,
     /// including any wrapped continuation rows.
     func getWrappedLineCharData(scrollInvariantStartingPosition start: Position) -> [CharData] {
-        var data: [CharData] = []
-        data += buffer.lines[start.row].data[start.col...]
+        var result: [CharData] = []
+        let lineData = buffer.lines[start.row].getData()
+        result += lineData[start.col...]
         var row = start.row
         while (row + 1) < buffer.lines.count && buffer.lines[row + 1].isWrapped {
             row += 1
-            data += buffer.lines[row].data
+            result += buffer.lines[row].getData()
         }
-        data = data.filter { $0.code != 0 }
-        return data
+        result = result.filter { $0.code != 0 }
+        return result
     }
 
     /// Erases cells to the end of the current line starting at the given scroll-invariant
