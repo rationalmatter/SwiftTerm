@@ -21,6 +21,9 @@ public final class Buffer {
     var xDisp, _yDisp, xBase: Int
     private var _x, _y, _yBase: Int
     private var _linesWithImagesCount: Int = 0
+
+    /// When `true`, reflow adjusts lines that contain the cursor instead of skipping them.
+    var reflowWrappedLinesWithCursor: Bool = false
     
     // this keeps incrementing even as we run out of space in _lines and trim out
     // old lines.
@@ -691,7 +694,7 @@ public final class Buffer {
 
             // If these lines contain the cursor don't touch them, the program will handle fixing up wrapped
             // lines with the cursor
-            if bufferAbsoluteY >= y && bufferAbsoluteY < i && !terminal.reflowWrappedLinesWithCursor {
+            if bufferAbsoluteY >= y && bufferAbsoluteY < i && !reflowWrappedLinesWithCursor {
                 y += wrappedLines.count - 1
                 continue
             }
@@ -921,7 +924,7 @@ public final class Buffer {
             // wrapped lines with the cursor
             let absoluteY = yBase + self.y
 
-            if absoluteY >= y && absoluteY < y + wrappedLines.count && !terminal.reflowWrappedLinesWithCursor {
+            if absoluteY >= y && absoluteY < y + wrappedLines.count && !reflowWrappedLinesWithCursor {
                 continue
             }
 

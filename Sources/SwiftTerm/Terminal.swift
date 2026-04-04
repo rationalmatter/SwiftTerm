@@ -384,7 +384,12 @@ open class Terminal {
     var softWraparoundForCarriageReturn: Bool = false
 
     /// When `true`, reflow adjusts lines that contain the cursor instead of skipping them.
-    var reflowWrappedLinesWithCursor: Bool = false
+    var reflowWrappedLinesWithCursor: Bool = false {
+        didSet {
+            normalBuffer.reflowWrappedLinesWithCursor = reflowWrappedLinesWithCursor
+            altBuffer.reflowWrappedLinesWithCursor = reflowWrappedLinesWithCursor
+        }
+    }
 
     func setMarginMode(_ value: Bool) {
         marginMode = value
