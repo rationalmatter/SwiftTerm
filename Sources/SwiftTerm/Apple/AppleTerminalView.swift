@@ -133,15 +133,21 @@ extension TerminalView {
         self.cellDimension = computeFontDimensions ()
 
         let zeroSizedView = width == 0 && height == 0
-        let terminalOptions = zeroSizedView
-            ? (terminal?.options ?? .default)
-            : TerminalOptions(cols: Int(width / cellDimension.width),
-                              rows: Int(height / cellDimension.height))
+        var opts: TerminalOptions
+        if zeroSizedView {
+            opts = terminal?.options ?? .default
+        } else {
+            opts = TerminalOptions(cols: Int(width / cellDimension.width),
+                                   rows: Int(height / cellDimension.height))
+        }
+        #if os(iOS) || os(visionOS)
+        opts.scrollback = terminalOptions.scrollback
+        #endif
 
         if terminal == nil {
-            terminal = Terminal(delegate: self, options: terminalOptions)
+            terminal = Terminal(delegate: self, options: opts)
         } else if !zeroSizedView {
-            terminal.options = terminalOptions
+            terminal.options = opts
             terminal.setup(isReset: false)
         }
         terminal.backgroundColor = Color.defaultBackground

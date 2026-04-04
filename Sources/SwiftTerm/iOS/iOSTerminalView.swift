@@ -142,6 +142,36 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public var allowMouseReporting: Bool = true
 
+    /// Controls whether text input is enabled on this terminal view.
+    /// When `false`, the keyboard cannot be activated and paste is disabled.
+    public var isInputEnabled: Bool = true {
+        didSet {
+            updateCursorVisibility()
+        }
+    }
+
+    /// When `true`, tapping the terminal area toggles the keyboard.
+    public var toggleKeyboardOnTap: Bool = false
+
+    /// Controls whether the Reset action is available in the context menu.
+    public var allowResettingViaContextMenu: Bool = true
+
+    /// When `true`, the floating-cursor vertical movement sends up/down arrow key events
+    /// even outside the alternate screen buffer.
+    public var allowFloatingCursorUpDownArrowKeyEvents: Bool = false
+
+    /// Proxies `Terminal.softWraparoundForCarriageReturn`.
+    public var softWraparoundForCarriageReturn: Bool {
+        get { terminal?.softWraparoundForCarriageReturn ?? false }
+        set { terminal?.softWraparoundForCarriageReturn = newValue }
+    }
+
+    /// Proxies `Terminal.reflowWrappedLinesWithCursor`.
+    public var reflowWrappedLinesWithCursor: Bool {
+        get { terminal?.reflowWrappedLinesWithCursor ?? false }
+        set { terminal?.reflowWrappedLinesWithCursor = newValue }
+    }
+
     /// Controls how link tracking resolves hovered links:
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
     public var linkReporting: LinkReporting = .implicit
@@ -156,6 +186,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     private var lastReportedLink: String?
+    internal var isAcceptingInput: Bool = false
+    private lazy var _noInputView = UIView()
     var commandActive = false
     private var activeCommandKeys: Set<UIKeyboardHIDUsage> = []
     private var pointerInteraction: UIPointerInteraction?
@@ -286,8 +318,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         selectNone ()
     }
     
-    public init(frame: CGRect, font: UIFont?) {
+    /// Terminal options to use when setting up the terminal emulator.
+    public var terminalOptions: TerminalOptions = .default
+
+    public init(frame: CGRect, font: UIFont?, options: TerminalOptions = .default) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.terminalOptions = options
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
         isAccessibilityElement = true
@@ -328,6 +364,51 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setupLinkReportingInteractions()
         setupAccessoryView ()
         didFinishSetup = true
+    }
+
+    // MARK: - Input control
+
+    public func startAcceptingInput() {
+        guard isInputEnabled else { return }
+        isAcceptingInput = true
+        _inputView = nil
+        reloadInputViews()
+        updateCursorVisibility()
+    }
+
+    public func stopAcceptingInput() {
+        isAcceptingInput = false
+        _inputView = _noInputView
+        reloadInputViews()
+        updateCursorVisibility()
+    }
+
+    public func toggleKeyboard() {
+        if isAcceptingInput {
+            stopAcceptingInput()
+            resignFirstResponder()
+        } else {
+            startAcceptingInput()
+            becomeFirstResponder()
+        }
+    }
+
+    public func showKeyboard() {
+        startAcceptingInput()
+        becomeFirstResponder()
+    }
+
+    func updateCursorVisibility() {
+        guard let caretView else { return }
+        if !isInputEnabled {
+            caretView.isHidden = true
+        } else if !isAcceptingInput {
+            caretView.isHidden = false
+            caretView.disableAnimations()
+        } else {
+            caretView.isHidden = false
+            caretView.updateCursorStyle()
+        }
     }
 
 #if canImport(MetalKit)
@@ -495,6 +576,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     @objc open override func paste (_ sender: Any?) {
+        guard isInputEnabled else { return }
         disableSelectionPanGesture()
         if let start = UIPasteboard.general.string {
             if terminal.bracketedPasteMode {
@@ -549,13 +631,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case #selector(copy(_:)):
             return selection.active
         case #selector(paste(_:)):
-            return true
+            return isInputEnabled
         case #selector(select(_:)):
             return !selection.active
         case #selector(selectAll(_:)):
             return true
         case #selector(resetCmd(_:)):
-            return true
+            return allowResettingViaContextMenu
         default:
             //print ("canPerformAction invoked for \(action)")
             return false
@@ -717,27 +799,32 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
 
+            let hasSelection = selection.active
+            let isMenuVisible = UIMenuController.shared.isMenuVisible
+
+            if hasSelection {
+                selection.selectNone()
+                disableSelectionPanGesture()
+            }
+            if isMenuVisible {
+                UIMenuController.shared.hideMenu()
+            }
+
             if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
                 sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
 
                 if terminal.mouseMode.sendButtonRelease() {
                     sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
                 }
-            } else {
-                if selection.active {
-                    selection.selectNone()
-                    disableSelectionPanGesture()
-                }
-                if UIMenuController.shared.isMenuVisible {
-                    UIMenuController.shared.hideMenu()
-                } else {
-                    let location = gestureRecognizer.location(in: gestureRecognizer.view)
-                    let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
-                    let displayBuffer = terminal.displayBuffer
-                    let cursorRow = displayBuffer.y + displayBuffer.yDisp
-                    if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
-                        showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
-                    }
+            } else if toggleKeyboardOnTap && !hasSelection && !isMenuVisible {
+                toggleKeyboard()
+            } else if !hasSelection && !isMenuVisible {
+                let location = gestureRecognizer.location(in: gestureRecognizer.view)
+                let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
+                let displayBuffer = terminal.displayBuffer
+                let cursorRow = displayBuffer.y + displayBuffer.yDisp
+                if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
+                    showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
                 }
             }
             queuePendingDisplay()
@@ -1668,6 +1755,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
     */
     open func insertText(_ text: String) {
+        guard isInputEnabled else { return }
         uitiLog("insertText(\(text.debugDescription)) \(textInputStateDescription())")
         commitTextInput(text, applyModifiers: true)
     }
@@ -2198,7 +2286,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     open override func becomeFirstResponder() -> Bool {
         let response = super.becomeFirstResponder()
         if response {
-            caretView?.updateCursorStyle()
+            updateCursorVisibility()
             terminal.setTerminalFocus(true)
         }
         return response
@@ -2209,8 +2297,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         if code {
             terminal.setTerminalFocus(false)
-            caretView?.disableAnimations()
-            caretView?.updateView()
+            updateCursorVisibility()
             keyRepeat?.invalidate()
             keyRepeat = nil
             

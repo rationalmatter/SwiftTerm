@@ -461,7 +461,7 @@ extension TerminalView: UITextInput {
             lastFloatingCursorLocation = point
         }
 
-        if terminal.isCurrentBufferAlternate {
+        if terminal.isCurrentBufferAlternate || allowFloatingCursorUpDownArrowKeyEvents {
             let deltay = lastPosition.y - point.y
 
             var data: [UInt8]

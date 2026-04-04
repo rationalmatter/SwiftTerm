@@ -378,6 +378,14 @@ open class Terminal {
     
     var wraparound: Bool = false
 
+    /// When `true` and wraparound is enabled, carriage return moves the cursor to the
+    /// beginning of the original non-wrapped line instead of the current wrapped row.
+    /// Ignored in margin mode.
+    var softWraparoundForCarriageReturn: Bool = false
+
+    /// When `true`, reflow adjusts lines that contain the cursor instead of skipping them.
+    var reflowWrappedLinesWithCursor: Bool = false
+
     func setMarginMode(_ value: Bool) {
         marginMode = value
         normalBuffer.setMarginMode(value)
@@ -1642,6 +1650,11 @@ open class Terminal {
             }
         } else {
             buffer.x = 0
+            if wraparound && softWraparoundForCarriageReturn {
+                while buffer.lines[buffer.y + buffer.yBase].isWrapped && buffer.y > 0 {
+                    buffer.y -= 1
+                }
+            }
         }
     }
     

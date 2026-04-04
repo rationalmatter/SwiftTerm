@@ -691,7 +691,7 @@ public final class Buffer {
 
             // If these lines contain the cursor don't touch them, the program will handle fixing up wrapped
             // lines with the cursor
-            if bufferAbsoluteY >= y && bufferAbsoluteY < i {
+            if bufferAbsoluteY >= y && bufferAbsoluteY < i && !terminal.reflowWrappedLinesWithCursor {
                 y += wrappedLines.count - 1
                 continue
             }
@@ -921,7 +921,7 @@ public final class Buffer {
             // wrapped lines with the cursor
             let absoluteY = yBase + self.y
 
-            if absoluteY >= y && absoluteY < y + wrappedLines.count {
+            if absoluteY >= y && absoluteY < y + wrappedLines.count && !terminal.reflowWrappedLinesWithCursor {
                 continue
             }
 
