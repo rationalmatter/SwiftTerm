@@ -592,7 +592,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     {
         return (size.width - scrollerWidth)
     }
-    
+
+    func getEffectiveHeight (size: CGSize) -> CGFloat
+    {
+        return size.height
+    }
+
     open func scrolled(source terminal: Terminal, yDisp: Int) {
         //selectionView.notifyScrolled(source: terminal)
         updateScroller()

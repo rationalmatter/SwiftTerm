@@ -1397,7 +1397,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         return frame.inset(by: adjustedContentInset).width
     }
-    
+
+    func getEffectiveHeight (size: CGSize) -> CGFloat
+    {
+        return frame.inset(by: adjustedContentInset).height
+    }
+
     func updateDebugDisplay ()
     {
     }

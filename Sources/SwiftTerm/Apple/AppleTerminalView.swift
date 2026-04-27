@@ -186,7 +186,7 @@ extension TerminalView {
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }
-        let newRows = Int (newSize.height / cellDimension.height)
+        let newRows = Int (getEffectiveHeight (size: newSize) / cellDimension.height)
         let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
         
         if newCols != terminal.cols || newRows != terminal.rows {
