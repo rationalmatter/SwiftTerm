@@ -2213,6 +2213,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         // Suppress during sync blocks and inter-block gaps.
         guard !terminal.synchronizedOutputActive && !inSyncSequence else { return }
+        // Only scroll when the caret has actually left the visible region. Feeds —
+        // including the in-place rewrites an embedder does to edit the current input
+        // line — call this on every update; unconditionally pinning to the bottom
+        // shoves content shorter than the viewport up by the bottom inset (e.g. the
+        // software keyboard) and the scroll view rubber-bands back, a per-keystroke
+        // jitter. Mirrors the macOS behaviour of leaving the offset alone while the
+        // caret is already on screen.
+        let displayBuffer = terminal.displayBuffer
+        let caretTop = CGFloat(displayBuffer.y + displayBuffer.yDisp) * cellDimension.height
+        let visibleTop = contentOffset.y + adjustedContentInset.top
+        let visibleBottom = contentOffset.y + bounds.height - adjustedContentInset.bottom
+        if cellDimension.height > 0, caretTop >= visibleTop, caretTop + cellDimension.height <= visibleBottom {
+            return
+        }
         let maxY = contentSize.height - bounds.height + adjustedContentInset.bottom
         contentOffset = CGPoint(x: contentOffset.x, y: max(-adjustedContentInset.top, maxY))
     }
