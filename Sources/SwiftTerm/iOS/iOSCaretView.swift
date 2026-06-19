@@ -87,12 +87,21 @@ class CaretView: UIView {
     }
     
     func updateCursorStyle () {
+        let styleBlinks: Bool
         switch style {
         case .blinkUnderline, .blinkBlock, .blinkBar:
-            updateAnimation(to: true)
+            styleBlinks = true
         case .steadyBar, .steadyBlock, .steadyUnderline:
-            updateAnimation(to: false)
+            styleBlinks = false
         }
+        // Only blink while focused. The draw path already shows a steady hollow
+        // caret when unfocused (`hasFocus`); without gating the animation too,
+        // routine `updateCursorStyle()` calls (entering the window, app
+        // foregrounding, losing first-responder while still accepting input)
+        // restart the blink regardless of focus — an unfocused blinking caret
+        // reads as a false "active input here" cue. `tracksFocus == false` keeps
+        // the previous always-blink behaviour for embedders that don't track focus.
+        updateAnimation(to: styleBlinks && (tracksFocus ? hasFocus : true))
         updateView()
     }
     
