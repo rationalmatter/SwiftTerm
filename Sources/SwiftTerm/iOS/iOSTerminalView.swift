@@ -828,11 +828,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 }
             }
             queuePendingDisplay()
+        } else if toggleKeyboardOnTap {
+            // An unfocused terminal that toggles the keyboard on tap should bring
+            // it up in a single tap (focus + accept input + keyboard) rather than
+            // only becoming first responder while input is still suppressed —
+            // otherwise it takes a second tap to actually show the keyboard.
+            showKeyboard()
         } else {
             let _ = becomeFirstResponder ()
         }
     }
-    
+
     @objc func doubleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
         guard gestureRecognizer.view != nil else { return }
