@@ -1578,6 +1578,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         lastLayoutBounds = currentBounds
     }
 
+    open override func adjustedContentInsetDidChange() {
+        super.adjustedContentInsetDidChange()
+        guard didFinishSetup else { return }
+        // The embedding environment can shrink the visible region by raising the bottom inset —
+        // a software keyboard via the safe area, or a floating accessory via contentInset — without
+        // changing our bounds, so layoutSubviews' size-change path never runs and the caret can end
+        // up hidden behind the obstruction. Re-run the (inset-aware) caret check whenever the adjusted
+        // inset settles so the cursor stays on screen.
+        ensureCaretIsVisible()
+    }
+
     open override var contentOffset: CGPoint {
         didSet {
 #if canImport(MetalKit)
