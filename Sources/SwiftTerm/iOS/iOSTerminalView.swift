@@ -389,13 +389,64 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             resignFirstResponder()
         } else {
             startAcceptingInput()
-            becomeFirstResponder()
+            focusDeliberately()
         }
     }
 
     public func showKeyboard() {
         startAcceptingInput()
-        becomeFirstResponder()
+        focusDeliberately()
+    }
+
+    // MARK: - Find-navigator focus guard
+
+    /// Set while a deliberate focus request (a tap on the terminal, `showKeyboard()`)
+    /// is taking first-responder status, letting `becomeFirstResponder()` proceed —
+    /// any visible find navigator has been dismissed first.
+    private var isPerformingDeliberateFocusRequest = false
+
+    /// Deliberately move input to the terminal: if a find navigator (⌘F) is presented
+    /// for another view in this window, dismiss it first — outside of any focus
+    /// update — then take first-responder status. Used by the terminal's own
+    /// interaction paths, where the user has unambiguously asked the terminal to
+    /// take over input.
+    @discardableResult
+    func focusDeliberately() -> Bool {
+        if #available(iOS 16.0, *) {
+            visibleFindInteraction()?.dismissFindNavigator()
+        }
+        isPerformingDeliberateFocusRequest = true
+        defer { isPerformingDeliberateFocusRequest = false }
+        return becomeFirstResponder()
+    }
+
+    /// Returns a find interaction in this view's window whose find navigator is
+    /// currently presented, if any. The navigator can be hosted in the system input
+    /// assistant bar above the keyboard, which is shared with whichever responder
+    /// holds first-responder status.
+    @available(iOS 16.0, *)
+    private func visibleFindInteraction() -> UIFindInteraction? {
+        guard let window else { return nil }
+        return Self.firstVisibleFindInteraction(in: window)
+    }
+
+    @available(iOS 16.0, *)
+    private static func firstVisibleFindInteraction(in view: UIView) -> UIFindInteraction? {
+        for interaction in view.interactions {
+            if let findInteraction = interaction as? UIFindInteraction, findInteraction.isFindNavigatorVisible {
+                return findInteraction
+            }
+        }
+        if let textView = view as? UITextView, let findInteraction = textView.findInteraction,
+           findInteraction.isFindNavigatorVisible {
+            return findInteraction
+        }
+        for subview in view.subviews {
+            if let found = firstVisibleFindInteraction(in: subview) {
+                return found
+            }
+        }
+        return nil
     }
 
     func updateCursorVisibility() {
@@ -689,7 +740,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     @objc func longPress (_ gestureRecognizer: UILongPressGestureRecognizer)
     {
          if gestureRecognizer.state == .began {
-             let _ = self.becomeFirstResponder()
+             let _ = self.focusDeliberately()
              let tapLocation = gestureRecognizer.location(in: gestureRecognizer.view)
              let tapRegion = makeContextMenuRegionForTap (point: tapLocation)
              
@@ -835,7 +886,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // otherwise it takes a second tap to actually show the keyboard.
             showKeyboard()
         } else {
-            let _ = becomeFirstResponder ()
+            let _ = focusDeliberately ()
         }
     }
 
@@ -2317,6 +2368,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
  
     open override func becomeFirstResponder() -> Bool {
+        // Becoming first responder reloads the input views; if a find navigator (⌘F)
+        // is presented for another view, that reload tears the navigator — and its
+        // search field — out of the input assistant bar. When the focus engine is
+        // mid-update targeting that field (e.g. a deferred first-responder intent
+        // being flushed while the user is in the find bar), UIKit throws
+        // NSInternalInconsistencyException ("The newly focused item ... is getting
+        // removed from the hierarchy in response of that item becoming focused").
+        // Refuse to steal input in that state; deliberate interactions with the
+        // terminal go through focusDeliberately(), which dismisses the navigator
+        // safely first.
+        if #available(iOS 16.0, *), !isPerformingDeliberateFocusRequest,
+           visibleFindInteraction() != nil {
+            return false
+        }
         let response = super.becomeFirstResponder()
         if response {
             updateCursorVisibility()
