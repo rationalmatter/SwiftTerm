@@ -427,7 +427,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     @available(iOS 16.0, *)
     private func visibleFindInteraction() -> UIFindInteraction? {
         guard let window else { return nil }
-        return Self.firstVisibleFindInteraction(in: window)
+        // The input assistant bar is shared per scene, so a navigator presented by
+        // any window in this window's scene can be evicted by the reload.
+        let windows = window.windowScene?.windows ?? [window]
+        for sceneWindow in windows {
+            if let findInteraction = Self.firstVisibleFindInteraction(in: sceneWindow) {
+                return findInteraction
+            }
+        }
+        return nil
     }
 
     @available(iOS 16.0, *)
