@@ -620,6 +620,23 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
     public var linkReporting: LinkReporting = .implicit
 
+    /// Proxies `Terminal.implicitLinkDetection`.
+    ///
+    /// Changing the options changes which ranges are underlined, so any hovered link is
+    /// dropped and the contents are redrawn.
+    public var implicitLinkDetection: Terminal.ImplicitLinkDetectionOptions {
+        get { terminal?.implicitLinkDetection ?? Terminal.ImplicitLinkDetectionOptions() }
+        set {
+            guard let terminal, terminal.implicitLinkDetection != newValue else {
+                return
+            }
+            terminal.implicitLinkDetection = newValue
+            linkHighlightRange = nil
+            terminal.updateFullScreen()
+            queuePendingDisplay()
+        }
+    }
+
     /// Controls link highlighting and link activation behavior.
     public var linkHighlightMode: LinkHighlightMode = .hoverWithModifier {
         didSet {
@@ -2229,7 +2246,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             }
             return
         }
-        let match = terminal.linkMatch(at: .buffer(position), mode: .explicitAndImplicit)
+        let match = linkLookupMode().flatMap { terminal.linkMatch(at: .buffer(position), mode: $0) }
         let newRange = match?.rowRanges
         if newRange != linkHighlightRange {
             let oldRange = linkHighlightRange

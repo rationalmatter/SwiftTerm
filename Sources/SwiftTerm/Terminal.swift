@@ -5472,6 +5472,9 @@ open class Terminal {
     
     public func resize (cols: Int, rows: Int)
     {
+        // A reflow re-splits logical lines across rows; the render caches are keyed by the old split.
+        implicitLinkRowRangeCache.removeAll(keepingCapacity: true)
+        implicitLinkReportedRowRanges.removeAll(keepingCapacity: true)
         let newCols = max (cols, MINIMUM_COLS)
         let newRows = max (rows, MINIMUM_ROWS)
         if newCols == self.cols && newRows == self.rows {
@@ -5890,6 +5893,66 @@ open class Terminal {
         case explicitAndImplicit
     }
 
+    /// Controls which implicit (non OSC 8) link shapes are detected in the terminal contents.
+    public struct ImplicitLinkDetectionOptions: Equatable, Sendable {
+        /// When `true`, file system paths such as `/tmp/notes.txt` or `./src/main.c` are detected.
+        public var detectsFilePaths: Bool = true
+
+        /// When `true`, scheme-less loopback hosts that carry an explicit port, such as
+        /// `localhost:8080` or `127.0.0.1:8080/status`, are detected.
+        public var detectsLoopbackHostPorts: Bool = false
+
+        /// Creates a set of implicit link detection options.
+        /// - Parameter detectsFilePaths: whether file system paths are detected
+        /// - Parameter detectsLoopbackHostPorts: whether scheme-less loopback host and port pairs are detected
+        public init(detectsFilePaths: Bool = true, detectsLoopbackHostPorts: Bool = false) {
+            self.detectsFilePaths = detectsFilePaths
+            self.detectsLoopbackHostPorts = detectsLoopbackHostPorts
+        }
+    }
+
+    /// Controls which implicit link shapes are detected, both for link lookups and for the
+    /// ranges reported to the renderer. Setting this recompiles the detection pattern and
+    /// discards any cached detection results.
+    public var implicitLinkDetection = ImplicitLinkDetectionOptions() {
+        didSet {
+            guard oldValue != implicitLinkDetection else {
+                return
+            }
+            implicitLinkRegex = Terminal.makeImplicitLinkRegex(options: implicitLinkDetection)
+            implicitLinkRowRangeCache.removeAll(keepingCapacity: true)
+            implicitLinkReportedRowRanges.removeAll(keepingCapacity: true)
+        }
+    }
+
+    // The pattern in use for implicit link detection, recompiled when the options change.
+    private var implicitLinkRegex: NSRegularExpression? = Terminal.defaultImplicitLinkRegex
+
+    private struct ImplicitLinkRowRangeCacheKey: Hashable {
+        let startRow: Int
+        let endRow: Int
+        let text: String
+    }
+
+    // Implicit matches for a whole logical line, keyed by the rows it covers and its contents,
+    // so that drawing a screenful of rows does not run the pattern once per row.   Only the
+    // character offsets of the matches are cached: the columns those offsets land on depend on
+    // how the rows are laid out, so they are mapped through freshly built cells on every call.
+    private var implicitLinkRowRangeCache: [ImplicitLinkRowRangeCacheKey: [Range<Int>]] = [:]
+
+    // The ranges last handed to the renderer for each row, so that a row whose implicit links
+    // changed because another row of the same logical line was rewritten can be redrawn.
+    private var implicitLinkReportedRowRanges: [Int: [LinkMatch.RowRange]] = [:]
+
+    // The cache is dropped wholesale once it grows past this many logical lines.
+    private static let implicitLinkRowRangeCacheLimit = 256
+
+    // The per row bookkeeping is dropped wholesale once it grows past this many rows.
+    private static let implicitLinkReportedRowLimit = 4096
+
+    // Logical lines longer than this are not scanned on behalf of the renderer.
+    private static let implicitLinkRenderTextLimit = 4096
+
     struct LinkMatch {
         struct RowRange: Equatable {
             let row: Int
@@ -6048,7 +6111,7 @@ open class Terminal {
         guard let lineMap = buildGhosttyImplicitLineMap(at: position, in: buffer) else {
             return nil
         }
-        guard let regex = Self.ghosttyImplicitLinkRegex else {
+        guard let regex = implicitLinkRegex else {
             return nil
         }
 
@@ -6164,6 +6227,13 @@ open class Terminal {
         let targetCol: Int
     }
 
+    private struct GhosttyImplicitLineContent {
+        let text: String
+        let cells: [GhosttyImplicitCellRef]
+        // The columns that contributed text for each row of the logical line.
+        let rowContentRanges: [Int: Range<Int>]
+    }
+
     private struct LinkRowEdgeInfo {
         let firstCol: Int
         let firstChar: Character
@@ -6174,12 +6244,14 @@ open class Terminal {
     // Ghostty-style URL/path pattern adapted for ICU regex.
     // Oniguruma uses a variable-length lookbehind in one branch; we keep
     // compatibility by applying an equivalent post-match suppression rule.
-    private static let ghosttyImplicitLinkRegex: NSRegularExpression? = {
+    static func makeImplicitLinkRegex(options: ImplicitLinkDetectionOptions) -> NSRegularExpression?
+    {
         let urlSchemes = #"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:"#
         let ipv6URLPattern = #"(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)"#
         let schemeURLChars = #"[\w\-.~:/?#@!$&*+,;=%]"#
         let pathChars = #"[\w\-.~:\/?#@!$&*+;=%]"#
-        let optionalBracketedWordSuffix = #"(?:[\(\[]\w*[\)\]])?"#
+        let bracketedWord = #"[\(\[]\w*[\)\]]"#
+        let optionalBracketedWordSuffix = "(?:" + bracketedWord + ")?"
         let noTrailingPunctuation = #"(?<![,.])"#
         let noTrailingColon = #"(?<!:)"#
         let trailingSpacesAtEOL = #"(?: +(?= *$))?"#
@@ -6191,6 +6263,24 @@ open class Terminal {
         let schemeURLBranch =
             "(?:" + urlSchemes + ")" +
             "(?:" + ipv6URLPattern + "|" + schemeURLChars + "+" + optionalBracketedWordSuffix + ")+" +
+            noTrailingPunctuation
+
+        // A scheme-less loopback host is only a link when it carries a port, and it must not be
+        // the tail of a longer host name, a mail address or a path.
+        let loopbackHostBoundary = #"(?<![\w.@\/-])"#
+        let loopbackHosts = #"(?:localhost|127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|0\.0\.0\.0|\[::1\])"#
+        // The port has to be the whole run of digits, so that a longer number is not clipped
+        // to its first five digits and reported as a link.
+        // ASCII digits only (ICU's \d spans every script), and nothing word-like may follow the
+        // port: `localhost:8050,` and `localhost:8050)` still match, `localhost:8050abc` does not.
+        let requiredPort = #":[0-9]{1,5}(?![\w-])"#
+        // A path, a query or a fragment may follow the port.
+        let loopbackSuffix = "(?:[\\/?#]" + pathChars + "*)?"
+        let loopbackHostPortBranch =
+            loopbackHostBoundary +
+            loopbackHosts +
+            requiredPort +
+            "(?:[\\/?#](?:" + pathChars + "|" + bracketedWord + ")*)?" +
             noTrailingPunctuation
 
         let rootedOrRelativePathPrefix = #"(?:\.\.\/|\.\/|(?<!\w)~\/|(?:[\w][\w\-.]*\/)*(?<!\w)\$[A-Za-z_]\w*\/|\.[\w][\w\-.]*\/|(?<![\w~\/])\/(?!\/))"#
@@ -6221,9 +6311,19 @@ open class Terminal {
             noTrailingColon +
             trailingSpacesAtEOL
 
-        let regex = schemeURLBranch + "|" + rootedOrRelativePathBranch + "|" + bareRelativePathBranch
-        return try? NSRegularExpression(pattern: regex, options: [])
-    }()
+        var branches = [schemeURLBranch]
+        if options.detectsLoopbackHostPorts {
+            branches.append(loopbackHostPortBranch)
+        }
+        if options.detectsFilePaths {
+            branches.append(rootedOrRelativePathBranch)
+            branches.append(bareRelativePathBranch)
+        }
+        return try? NSRegularExpression(pattern: branches.joined(separator: "|"), options: [])
+    }
+
+    private static let defaultImplicitLinkRegex: NSRegularExpression? =
+        makeImplicitLinkRegex(options: ImplicitLinkDetectionOptions())
 
     private static let ghosttyContinuationCharacters = CharacterSet(
         charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#[]@!$&*+,;=%()"
@@ -6247,25 +6347,57 @@ open class Terminal {
             targetCol -= 1
         }
 
-        var startRow = targetRow
+        let span = implicitLineRowSpan(around: targetRow, in: buffer)
+        let content = buildImplicitLineContent(startRow: span.start, endRow: span.end, in: buffer)
+
+        guard !content.text.isEmpty,
+              !content.cells.isEmpty,
+              content.rowContentRanges[targetRow]?.contains(targetCol) == true
+        else {
+            return nil
+        }
+
+        return GhosttyImplicitLineMap(
+            text: content.text,
+            cells: content.cells,
+            targetRow: targetRow,
+            targetCol: targetCol
+        )
+    }
+
+    // Returns the range of rows that make up the logical line containing the provided row,
+    // following both the wrap flag and the soft-wrap heuristic.
+    private func implicitLineRowSpan(around row: Int, in buffer: Buffer) -> (start: Int, end: Int)
+    {
+        var startRow = row
         while startRow > 0 && buffer.lines[startRow].isWrapped {
             startRow -= 1
         }
-        var endRow = targetRow
+        var endRow = row
         while endRow + 1 < buffer.lines.count && buffer.lines[endRow + 1].isWrapped {
             endRow += 1
         }
-        if startRow == targetRow && endRow == targetRow,
-           let (heuristicStart, heuristicEnd) = heuristicImplicitGroup(around: targetRow, in: buffer)
+        if startRow == row && endRow == row,
+           let (heuristicStart, heuristicEnd) = heuristicImplicitGroup(around: row, in: buffer)
         {
             startRow = heuristicStart
             endRow = heuristicEnd
         }
+        return (startRow, endRow)
+    }
 
+    // Joins the trimmed contents of the provided rows into the text that implicit detection
+    // runs on, keeping a cell reference per character so matches can be mapped back to columns.
+    // Callers that discard over-long lines can pass a character limit to stop building early.
+    private func buildImplicitLineContent(startRow: Int, endRow: Int, in buffer: Buffer, characterLimit: Int = Int.max) -> GhosttyImplicitLineContent
+    {
         var text = ""
         var cells: [GhosttyImplicitCellRef] = []
+        var rowContentRanges: [Int: Range<Int>] = [:]
+        guard startRow <= endRow else {
+            return GhosttyImplicitLineContent(text: text, cells: cells, rowContentRanges: rowContentRanges)
+        }
         cells.reserveCapacity((endRow - startRow + 1) * cols)
-        var targetIsInsideTrimmedContent = false
 
         for row in startRow...endRow {
             let line = buffer.lines[row]
@@ -6282,9 +6414,7 @@ open class Terminal {
             guard startCol < lineLimit else {
                 continue
             }
-            if row == targetRow && targetCol >= startCol && targetCol < lineLimit {
-                targetIsInsideTrimmedContent = true
-            }
+            rowContentRanges[row] = startCol..<lineLimit
 
             for col in startCol..<lineLimit {
                 if col > 0 && line[col].code == 0 && line[col - 1].width == 2 {
@@ -6303,19 +6433,160 @@ open class Terminal {
                         width: max(1, Int(cell.width))
                     )
                 )
+                if cells.count > characterLimit {
+                    return GhosttyImplicitLineContent(text: text, cells: cells, rowContentRanges: rowContentRanges)
+                }
             }
         }
 
-        guard !text.isEmpty, !cells.isEmpty, targetIsInsideTrimmedContent else {
-            return nil
+        return GhosttyImplicitLineContent(text: text, cells: cells, rowContentRanges: rowContentRanges)
+    }
+
+    /// Returns every implicit link range that lands on the provided row of the display buffer.
+    ///
+    /// This is meant for rendering, which asks about one drawn row at a time: the pattern is run
+    /// once for the whole logical line and its matches are cached, and logical lines longer than
+    /// `implicitLinkRenderTextLimit` characters are skipped so that a single very long line of output does not
+    /// cost a pattern pass per drawn row.
+    /// - Parameter row: a row in the display buffer
+    /// - Returns: the ranges of columns covered by implicit links on that row
+    func implicitLinkRowRanges(row: Int) -> [LinkMatch.RowRange]
+    {
+        let buffer = displayBuffer
+        guard row >= 0 && row < buffer.lines.count else {
+            return []
         }
 
-        return GhosttyImplicitLineMap(
-            text: text,
-            cells: cells,
-            targetRow: targetRow,
-            targetCol: targetCol
-        )
+        let span = implicitLineRowSpan(around: row, in: buffer)
+        let content = buildImplicitLineContent(
+            startRow: span.start,
+            endRow: span.end,
+            in: buffer,
+            characterLimit: Terminal.implicitLinkRenderTextLimit)
+
+        var rowRanges: [Int: [LinkMatch.RowRange]] = [:]
+        if !content.text.isEmpty,
+           !content.cells.isEmpty,
+           content.cells.count <= Terminal.implicitLinkRenderTextLimit
+        {
+            let key = ImplicitLinkRowRangeCacheKey(startRow: span.start, endRow: span.end, text: content.text)
+            let textRanges: [Range<Int>]
+            if let cached = implicitLinkRowRangeCache[key] {
+                textRanges = cached
+            } else {
+                textRanges = computeImplicitLinkTextRanges(in: content)
+                if implicitLinkRowRangeCache.count >= Terminal.implicitLinkRowRangeCacheLimit {
+                    implicitLinkRowRangeCache.removeAll(keepingCapacity: true)
+                }
+                implicitLinkRowRangeCache[key] = textRanges
+            }
+            rowRanges = mapImplicitLinkTextRanges(textRanges, in: content)
+        }
+
+        invalidateRowsWithChangedImplicitLinks(rowRanges, span: span, drawnRow: row, in: buffer)
+        return rowRanges[row] ?? []
+    }
+
+    // Runs the detection pattern over the joined text of a logical line and returns the character
+    // offsets of the matches that survive the suppression rule.   The offsets carry no geometry,
+    // so they remain valid for every layout the same text is drawn with.
+    private func computeImplicitLinkTextRanges(in content: GhosttyImplicitLineContent) -> [Range<Int>]
+    {
+        guard let regex = implicitLinkRegex else {
+            return []
+        }
+
+        var result: [Range<Int>] = []
+        let searchRange = NSRange(content.text.startIndex..<content.text.endIndex, in: content.text)
+        for match in regex.matches(in: content.text, options: [], range: searchRange) {
+            guard match.range.length > 0,
+                  let textRange = Range(match.range, in: content.text)
+            else {
+                continue
+            }
+            if suppressGhosttyLikeMatch(textRange, in: content.text) {
+                continue
+            }
+
+            let startOffset = content.text.distance(from: content.text.startIndex, to: textRange.lowerBound)
+            let endOffset = content.text.distance(from: content.text.startIndex, to: textRange.upperBound)
+            guard startOffset < endOffset else {
+                continue
+            }
+            result.append(startOffset..<endOffset)
+        }
+        return result
+    }
+
+    // Maps character offsets into the joined text onto the columns they cover, using the cells
+    // that the text was just built from, so that a change in layout moves the ranges with it.
+    private func mapImplicitLinkTextRanges(
+        _ textRanges: [Range<Int>],
+        in content: GhosttyImplicitLineContent) -> [Int: [LinkMatch.RowRange]]
+    {
+        var result: [Int: [LinkMatch.RowRange]] = [:]
+        for textRange in textRanges {
+            guard textRange.lowerBound < content.cells.count else {
+                continue
+            }
+            let boundedEnd = min(textRange.upperBound, content.cells.count)
+            guard boundedEnd > textRange.lowerBound else {
+                continue
+            }
+
+            var rowBounds: [Int: (start: Int, end: Int)] = [:]
+            for idx in textRange.lowerBound..<boundedEnd {
+                let cell = content.cells[idx]
+                let cellEnd = cell.col + max(1, cell.width)
+
+                if var bounds = rowBounds[cell.row] {
+                    bounds.start = min(bounds.start, cell.col)
+                    bounds.end = max(bounds.end, cellEnd)
+                    rowBounds[cell.row] = bounds
+                } else {
+                    rowBounds[cell.row] = (start: cell.col, end: cellEnd)
+                }
+            }
+
+            for row in rowBounds.keys.sorted() {
+                guard let bounds = rowBounds[row], bounds.start < bounds.end else {
+                    continue
+                }
+                result[row, default: []].append(.init(row: row, range: bounds.start..<bounds.end))
+            }
+        }
+        return result
+    }
+
+    // A row is drawn on its own, but its implicit links come from the whole logical line: when a
+    // fresh computation changes the ranges of one of the other rows of that line, that row is
+    // marked for redraw so its underlines do not go stale.   The row being drawn is skipped, so
+    // that a row marked here finds the same ranges when it is redrawn and marks nothing further.
+    private func invalidateRowsWithChangedImplicitLinks(
+        _ rowRanges: [Int: [LinkMatch.RowRange]],
+        span: (start: Int, end: Int),
+        drawnRow: Int,
+        in buffer: Buffer)
+    {
+        guard span.start <= span.end else {
+            return
+        }
+        if implicitLinkReportedRowRanges.count > Terminal.implicitLinkReportedRowLimit {
+            implicitLinkReportedRowRanges.removeAll(keepingCapacity: true)
+        }
+
+        for row in span.start...span.end {
+            let ranges = rowRanges[row] ?? []
+            let previous = implicitLinkReportedRowRanges.updateValue(ranges, forKey: row)
+            guard row != drawnRow, let previous, previous != ranges else {
+                continue
+            }
+            let screenRow = row - buffer.yDisp
+            guard screenRow >= 0 && screenRow < rows else {
+                continue
+            }
+            updateRange(borrowing: buffer, screenRow)
+        }
     }
 
     private func isImplicitContinuationRow(_ row: Int, startRow: Int, in buffer: Buffer) -> Bool
@@ -6437,7 +6708,7 @@ open class Terminal {
         in buffer: Buffer
     ) -> Bool
     {
-        guard let regex = Self.ghosttyImplicitLinkRegex else {
+        guard let regex = implicitLinkRegex else {
             return false
         }
         guard upper >= 0, upper < buffer.lines.count, lower >= 0, lower < buffer.lines.count else {

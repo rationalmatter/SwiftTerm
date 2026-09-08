@@ -57,6 +57,9 @@ public enum LinkHighlightMode {
     case always
     /// Underline explicit links only while the modifier is pressed.
     case alwaysWithModifier
+    /// Always underline explicit and implicit links; a click or tap activates either one
+    /// without hovering it first and without holding a modifier.
+    case alwaysIncludingImplicit
 }
 
 /// A rendered fragment that starts at a specific column and contains a run of
@@ -626,6 +629,7 @@ extension TerminalView {
     {
         var segments: [ViewLineSegment] = []
         let selectionColumns = selectedColumnsRange(row: row, cols: cols)
+        let implicitLinkRanges = implicitLinkRangesForUnderline(row: row)
         var col = 0
         var builder: ViewLineSegmentBuilder?
         var kittyPlaceholders: [KittyPlaceholderCell] = []
@@ -652,7 +656,7 @@ extension TerminalView {
             let ch: CharData = line[col]
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
-            let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
+            let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch, implicitRanges: implicitLinkRanges)
             guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
                 flushPending()
                 if let finished = builder?.buildIfNeeded() {
@@ -757,13 +761,34 @@ extension TerminalView {
                             boxDrawings: boxDrawings)
     }
 
-    func shouldUnderlineLink(row: Int, column: Int, width: Int, cell: CharData) -> Bool
+    /// The implicit link ranges that the row being rendered should underline, if any.
+    ///
+    /// Computed once per row so that the per-cell check below is a range overlap
+    /// rather than a pattern match.
+    func implicitLinkRangesForUnderline(row: Int) -> [Terminal.LinkMatch.RowRange]
     {
+        guard linkHighlightMode == .alwaysIncludingImplicit, linkReporting == .implicit else {
+            return []
+        }
+        return terminal.implicitLinkRowRanges(row: row)
+    }
+
+    func shouldUnderlineLink(row: Int, column: Int, width: Int, cell: CharData, implicitRanges: [Terminal.LinkMatch.RowRange] = []) -> Bool
+    {
+        guard linkReporting != .none else {
+            return false
+        }
         switch linkHighlightMode {
         case .always:
             return cell.hasPayload
         case .alwaysWithModifier:
             return commandActive && cell.hasPayload
+        case .alwaysIncludingImplicit:
+            if cell.hasPayload {
+                return true
+            }
+            let cellRange = column..<(column + width)
+            return implicitRanges.contains { $0.row == row && $0.range.overlaps(cellRange) }
         case .hover:
             guard let highlights = linkHighlightRange,
                   let highlight = highlights.first(where: { $0.row == row })
@@ -851,6 +876,8 @@ extension TerminalView {
             return match.isExplicit
         case .alwaysWithModifier:
             return match.isExplicit && hasCommandModifier
+        case .alwaysIncludingImplicit:
+            return true
         case .hover:
             return linkHighlightRange == match.rowRanges
         case .hoverWithModifier:
@@ -858,9 +885,28 @@ extension TerminalView {
         }
     }
 
+    /// The lookup mode implied by `linkReporting`, or `nil` when link tracking is off.
+    ///
+    /// Click activation, hover tracking and underlining all resolve links through this, so
+    /// that the three of them agree on which links exist.
+    func linkLookupMode() -> Terminal.LinkLookupMode?
+    {
+        switch linkReporting {
+        case .none:
+            return nil
+        case .explicit:
+            return .explicitOnly
+        case .implicit:
+            return .explicitAndImplicit
+        }
+    }
+
     func linkForClick(at position: Position, hasCommandModifier: Bool) -> (link: String, params: [String:String])?
     {
-        guard let match = terminal.linkMatch(at: .buffer(position), mode: .explicitAndImplicit) else {
+        guard let mode = linkLookupMode() else {
+            return nil
+        }
+        guard let match = terminal.linkMatch(at: .buffer(position), mode: mode) else {
             return nil
         }
         guard linkVisibleForClick(match: match, hasCommandModifier: hasCommandModifier) else {
