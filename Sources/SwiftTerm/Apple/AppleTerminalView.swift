@@ -347,7 +347,14 @@ extension TerminalView {
             // Sync block starting — cancel any pending sequence-end render.
             syncEndRenderTimer?.cancel()
             syncEndRenderTimer = nil
+            // Rapid BSU/ESU pairs coalesce into one block (see below), so only the first one
+            // opens it: the geometry to judge the whole sequence against is the geometry from
+            // before any of its output arrived.
+            let wasInSyncSequence = inSyncSequence
             inSyncSequence = true
+            if !wasInSyncSequence {
+                synchronizedOutputBlockDidBegin()
+            }
         } else {
             // Sync block ended — defer render by syncSequenceSettleMs.
             //
@@ -364,7 +371,7 @@ extension TerminalView {
                 guard let self else { return }
                 self.syncEndRenderTimer = nil
                 self.inSyncSequence = false
-                self.updateScroller()
+                self.synchronizedOutputBlockDidEnd()
                 self.queuePendingDisplay()
                 self.terminalDelegate?.scrolled(source: self, position: self.scrollPosition)
             }
@@ -2042,8 +2049,9 @@ extension TerminalView {
      */
     public func changeScrollback (_ newScrollback: Int?)
     {
+        scrollbackWillChange()
         terminal.changeScrollback(newScrollback)
-        updateScroller()
+        scrollbackDidChange()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
         queuePendingDisplay()
     }

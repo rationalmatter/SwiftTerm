@@ -665,6 +665,32 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scroller.doubleValue = scrollPosition
         scroller.knobProportion = scrollThumbsize
     }
+
+    /// Called before the scrollback size changes. This view scrolls through its enclosing
+    /// clip view, which keeps its own document position, so there is nothing to record.
+    func scrollbackWillChange ()
+    {
+    }
+
+    /// Called after the scrollback size changed and the terminal dropped the lines that no
+    /// longer fit. The clip view keeps the document position across the trim, so only the
+    /// scroller has to be brought up to date.
+    func scrollbackDidChange ()
+    {
+        updateScroller ()
+    }
+
+    /// Called when a synchronized-output block opens. This view scrolls through its enclosing
+    /// clip view rather than owning the offset itself, so there is no geometry to record.
+    func synchronizedOutputBlockDidBegin ()
+    {
+    }
+
+    /// Called when a synchronized-output block completes and its frame is about to be painted.
+    func synchronizedOutputBlockDidEnd ()
+    {
+        updateScroller ()
+    }
     
     var userScrolling = false
 

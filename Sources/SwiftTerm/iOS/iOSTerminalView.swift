@@ -1540,7 +1540,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     open func scrolled(source terminal: Terminal, yDisp: Int) {
         //XselectionView.notifyScrolled(source: terminal)
-        updateScroller()
+        followOutput()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
     }
     
@@ -1552,11 +1552,705 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     
-    func updateScroller ()
+    /// Turns the live buffer's `linesTop` into rows trimmed off the top since the last look.
+    private var trimTracker = ScrollAnchoring.TrimTracker ()
+
+    /// Rows the scrollback trimmed while a gesture owned the offset, waiting to be applied
+    /// in one go once the scroll view has settled.
+    private var deferredTrimmedRows: Int = 0
+
+    /// Vertical content offset the banked rows above were counted against.
+    ///
+    /// Rows are banked one gesture at a time, but a finger can rest, take a few rows, and only
+    /// then drag: the drag moves the content past those rows itself, and subtracting them
+    /// again once it settles would shift the text twice. `nil` when nothing is banked.
+    private var deferredTrimOffsetY: CGFloat?
+
+    /// Vertical content offset recorded when a follow had to be deferred because a touch
+    /// was in flight. `nil` when no follow is pending.
+    private var pendingFollowOffsetY: CGFloat?
+
+    /// Vertical content offset recorded when *keeping the caret on screen* had to be deferred
+    /// because a touch was in flight. `nil` when no caret follow is pending.
+    ///
+    /// Trims are not the only thing an interaction can defer: a viewport that was following
+    /// the caret rather than the bottom owes that follow once the finger lifts, and with no
+    /// rows banked there would otherwise be nothing to bring the settle poll back. Like
+    /// ``pendingFollowOffsetY`` this is a latch rather than a flag - output never moves the
+    /// offset while a gesture is in flight, so an offset still sitting where the deferral was
+    /// taken means the finger only rested, while any real movement is the reader scrolling
+    /// back and retires the intent.
+    private var pendingCaretFollowOffsetY: CGFloat?
+
+    /// Whether a settle check is already queued, so the poll below re-arms once per interval
+    /// rather than once per deferred row.
+    private var interactionSettleScheduled = false
+
+    /// How often the settle poll looks at the interaction flags: fine enough that a flick
+    /// resolves within a frame or two of stopping, coarse enough to cost nothing during a
+    /// long drag.
+    private let interactionSettleInterval: TimeInterval = 1.0 / 30
+
+    /// Vertical content offset at which a geometry change left a viewport that was still
+    /// showing the caret. `nil` unless the viewport is in that state.
+    ///
+    /// Raising the bottom inset moves the bottom of the content out from under a viewport
+    /// nobody touched, so geometry alone stops calling it anchored while it is plainly still
+    /// on the live edge. Recording the offset lets the next append tell that viewport - which
+    /// has not moved since - from one the reader scrolled back, and keep the caret on screen
+    /// until the content outgrows the viewport and bottom anchoring re-arms by itself.
+    private var caretFollowOffsetY: CGFloat?
+
+    /// Adjusted content inset and viewport height the last follow decision was judged
+    /// against, so that a change to either can ask where the viewport stood *before* it.
+    private var lastAnchoringInset: UIEdgeInsets = .zero
+    private var lastAnchoringViewportHeight: CGFloat = 0
+
+    /// Whether the viewport was parked at the bottom when the current synchronized-output
+    /// block opened, and the offset it stood at. `nil` while no block is in flight.
+    private var syncBlockWasAnchored: Bool?
+    private var syncBlockOffsetY: CGFloat?
+
+    /// Whether the viewport was parked at the bottom when a scrollback change began, and the
+    /// row it was showing at the top. `nil` while no change is in flight.
+    private var scrollbackChangeWasAnchored: Bool?
+    private var scrollbackChangeTopRowAnchor: TopRowAnchor?
+
+    /// Rows the scrollback dropped off the top since the previous call.
+    ///
+    /// `Terminal.scroll` bumps `linesTop` by one for every line it trims and notifies the
+    /// delegate synchronously - once per line, never coalesced - so consecutive readings
+    /// differ by an exact row count. This reads the live buffer rather than `displayBuffer`:
+    /// a synchronized-output block freezes `displayBuffer` on a snapshot whose `linesTop`
+    /// never advances, which would hide every trim the block performs. Returns zero whenever
+    /// the two readings are not comparable: a swapped buffer, or a `linesTop` that went
+    /// backwards (clearing the scrollback resets it to zero without a notification).
+    private func consumeTrimmedRows () -> Int
+    {
+        let buffer = terminal.buffer
+        return trimTracker.consume (bufferID: ObjectIdentifier (buffer), linesTop: buffer.linesTop)
+    }
+
+    /// Whether the viewport is currently parked at the bottom of the content.
+    ///
+    /// A viewport with no height yet has not been laid out and so cannot have been scrolled
+    /// away from the bottom: it counts as anchored until there is real geometry to judge by.
+    private func isAnchoredToBottom () -> Bool
+    {
+        isAnchoredToBottom (viewportHeight: bounds.height, inset: adjustedContentInset)
+    }
+
+    /// Whether the viewport is parked at the bottom when judged against the given geometry.
+    ///
+    /// Taking the geometry as parameters lets a bounds or inset change ask where the viewport
+    /// stood under the geometry the user last saw, before the change moved the bottom.
+    private func isAnchoredToBottom (viewportHeight: CGFloat, inset: UIEdgeInsets) -> Bool
+    {
+        viewportHeight <= 0 || ScrollAnchoring.isAnchoredToBottom (
+            contentOffsetY: contentOffset.y,
+            contentHeight: contentSize.height,
+            viewportHeight: viewportHeight,
+            topInset: inset.top,
+            bottomInset: inset.bottom,
+            rowHeight: cellDimension.height)
+    }
+
+    /// Records the geometry an anchoring decision is being made against, so the next bounds
+    /// or inset change can judge against it rather than against the geometry it introduced.
+    /// Every site that takes such a decision calls this alongside its anchoring query, which
+    /// keeps that memory in step with the decisions actually taken.
+    private func rememberAnchoringGeometry ()
+    {
+        // A collapsed pane - a split the embedder closed, a view laid out before it has any
+        // size - is not geometry any decision can be judged against: `isAnchoredToBottom`
+        // calls a zero-height viewport anchored, so recording one would make the restore that
+        // follows drag a reader who was scrolled back down to the bottom. Keep the last real
+        // reading instead.
+        guard bounds.height > 0 else {
+            return
+        }
+        lastAnchoringViewportHeight = bounds.height
+        lastAnchoringInset = adjustedContentInset
+    }
+
+    /// Whether the caret would be on screen with the viewport at `offsetY`.
+    ///
+    /// The band is the viewport reduced by both insets, which is what the reader can actually
+    /// see: a software keyboard covers the bottom `inset.bottom` points of it. This is the
+    /// same test ``ensureCaretIsVisible()`` applies before deciding to scroll, asked as a
+    /// question so that a policy can be chosen before anything moves.
+    private func isCaretVisible (offsetY: CGFloat, viewportHeight: CGFloat, inset: UIEdgeInsets) -> Bool
+    {
+        guard cellDimension.height > 0, viewportHeight > 0 else {
+            return false
+        }
+        let displayBuffer = terminal.displayBuffer
+        let caretTop = CGFloat (displayBuffer.y + displayBuffer.yDisp) * cellDimension.height
+        let visibleTop = offsetY + inset.top
+        let visibleBottom = offsetY + viewportHeight - inset.bottom
+        return caretTop >= visibleTop && caretTop + cellDimension.height <= visibleBottom
+    }
+
+    /// Whether the caret is on screen right now.
+    private func isCaretVisible () -> Bool
+    {
+        isCaretVisible (offsetY: contentOffset.y, viewportHeight: bounds.height, inset: adjustedContentInset)
+    }
+
+    /// The offset clamped to what the scroll view can actually reach.
+    private func clampedOffsetY (_ offsetY: CGFloat) -> CGFloat
+    {
+        min (max (offsetY, -adjustedContentInset.top),
+             ScrollAnchoring.bottomOffsetY (
+                contentHeight: contentSize.height,
+                viewportHeight: bounds.height,
+                topInset: adjustedContentInset.top,
+                bottomInset: adjustedContentInset.bottom))
+    }
+
+    /// Moves the viewport to `offsetY`, leaving the horizontal offset alone.
+    private func setContentOffsetY (_ offsetY: CGFloat)
+    {
+        if offsetY != contentOffset.y {
+            contentOffset = CGPoint (x: contentOffset.x, y: offsetY)
+        }
+    }
+
+    /// Restores the follow policy after the viewport geometry changed - a software keyboard or
+    /// a floating accessory raising the bottom inset, or the view itself being resized.
+    ///
+    /// The caret decides first. A terminal is created with its viewport already filled with
+    /// blank rows, so a session whose prompt sits on one of the first ones is "at the bottom"
+    /// by geometry: pinning it to a bottom that a keyboard has just pushed down by its own
+    /// height would scroll that prompt off the top. A viewport whose caret survives the change
+    /// therefore keeps its offset and follows the caret from there.
+    ///
+    /// Obstructions arrive in steps - a keyboard, then its accessory bar - and the step that
+    /// keeps the caret leaves the view geometrically un-anchored, so the step that covers it
+    /// would look like a reader scrolled back. An intact caret-follow latch says otherwise:
+    /// nothing has moved this viewport since it was last judged to be on the live edge, so the
+    /// caret is brought back rather than abandoned. ``ensureCaretIsVisible()`` does that by
+    /// parking at the bottom offset, which also re-arms bottom anchoring.
+    ///
+    /// Failing that, a viewport parked at the bottom must stay parked - the change moved the
+    /// bottom, and following has to move with it. A viewport the reader had scrolled back must
+    /// keep showing the rows it showed.
+    ///
+    /// - Parameters:
+    ///   - wasAnchored: Whether the viewport was parked at the bottom under the geometry the
+    ///     reader last saw, measured before the change.
+    ///   - previousOffsetY: The offset that shows the rows the reader had before the change.
+    ///     For a resize or a scrollback change this is a text anchor rather than the literal
+    ///     old offset, and it is also the offset the caret is judged against: `processSizeChange`
+    ///     runs its own caret check on the way through, so the live offset may already have
+    ///     been pinned.
+    private func applyGeometryChange (wasAnchored: Bool, previousOffsetY: CGFloat)
+    {
+        guard bounds.height > 0 else {
+            return
+        }
+        // Read before anything moves the offset: the latch is only intact while the viewport
+        // still sits where the previous geometry change left it following the caret.
+        let latchedOnCaret = caretFollowOffsetY.map {
+            ScrollAnchoring.resumesFollowing (latchedOffsetY: $0, currentOffsetY: contentOffset.y)
+        } ?? false
+        let restoredOffsetY = clampedOffsetY (previousOffsetY)
+        if isCaretVisible (offsetY: restoredOffsetY, viewportHeight: bounds.height, inset: adjustedContentInset) {
+            setContentOffsetY (restoredOffsetY)
+            caretFollowOffsetY = contentOffset.y
+            return
+        }
+        if latchedOnCaret {
+            // Un-anchored only because an earlier step of the same obstruction moved the
+            // bottom away, and untouched since: this step covered the caret, so bring it back
+            // and stay latched on it.
+            ensureCaretIsVisible ()
+            caretFollowOffsetY = contentOffset.y
+            return
+        }
+        caretFollowOffsetY = nil
+        if wasAnchored {
+            // Following lands on the bottom whatever came off the top, so nothing is owed.
+            clearBankedTrimmedRows ()
+            scrollToBottom ()
+            // A scrolling region can leave the caret above the viewport even at the bottom.
+            ensureCaretIsVisible ()
+            return
+        }
+        setContentOffsetY (restoredOffsetY)
+    }
+
+    /// The row at the top of the viewport, identified by the text drawn there.
+    ///
+    /// A resize is the one event that changes which text a given offset shows, so it is the
+    /// one that has to be undone in terms of text rather than pixels. Identifying the row by
+    /// its `BufferLine` object does not survive it: `Buffer.reflowNarrower` and
+    /// `reflowWider` re-wrap a logical line by rewriting the objects it already occupies in
+    /// place, so the object found afterwards holds a different slice of the same line - a
+    /// narrowing can hand back a row of text the reader had already gone past.
+    ///
+    /// What does survive is the logical line and how far into it the row starts: re-wrapping
+    /// changes how many rows a logical line occupies, never how many logical lines there are.
+    private struct TopRowAnchor {
+        /// Logical lines between the caret's own line and the line drawn at the top of the
+        /// viewport - positive while the top row is above the caret. `nil` when the buffer
+        /// could not be read, or the offset pointed outside the line storage.
+        ///
+        /// The reading is taken against the caret rather than against the top of the storage
+        /// so that it also survives rows trimmed off the top, which move the caret and the
+        /// anchored line by exactly the same number of logical lines.
+        let logicalLinesAboveCaret: Int?
+        /// How far into that logical line the anchored row starts, counted in characters as
+        /// if the line had unlimited columns - which is what makes it wrap invariant.
+        let characterOffset: Int
+        /// How far into the anchored row the viewport's top edge cut.
+        let rowFraction: CGFloat
+        /// Line count before the change. Compared with the storage's capacity afterwards it
+        /// gives the rows that came off the top, which is what the pixel fallback owes.
+        let lineCount: Int
+        /// The offset itself, the last-resort restore.
+        let offsetY: CGFloat
+    }
+
+    /// Records which text is drawn at the top of the viewport, before a resize moves it.
+    private func captureTopRowAnchor () -> TopRowAnchor
+    {
+        let offsetY = contentOffset.y
+        let rowHeight = cellDimension.height
+        let lines = terminal.buffer.lines
+        // A synchronized-output block paints from a frozen snapshot, so the live buffer's
+        // rows are not the ones the offset currently refers to: fall back to pixels.
+        guard rowHeight > 0, !terminal.synchronizedOutputActive, !inSyncSequence else {
+            return TopRowAnchor (logicalLinesAboveCaret: nil, characterOffset: 0, rowFraction: 0,
+                                 lineCount: lines.count, offsetY: offsetY)
+        }
+        let topY = offsetY + adjustedContentInset.top
+        let index = Int (floor (topY / rowHeight))
+        let rowFraction = topY - CGFloat (index) * rowHeight
+        guard index >= 0, index < lines.count,
+              let caret = caretLogicalPosition (),
+              let top = terminal.getWraparoundInvariantPosition (forBufferPosition: Position (col: 0, row: index)) else {
+            return TopRowAnchor (logicalLinesAboveCaret: nil, characterOffset: 0, rowFraction: rowFraction,
+                                 lineCount: lines.count, offsetY: offsetY)
+        }
+        return TopRowAnchor (logicalLinesAboveCaret: caret.row - top.row,
+                             characterOffset: top.col,
+                             rowFraction: rowFraction,
+                             lineCount: lines.count,
+                             offsetY: offsetY)
+    }
+
+    /// The offset that puts `anchor`'s text back at the top of the viewport after a resize.
+    ///
+    /// Three things move the rows under a fixed offset. Shrinking the terminal shortens the
+    /// scrollback, and `Buffer.resize` trims the excess off the top without touching
+    /// `linesTop`, so nothing else notices; changing the scrollback size does the same; and
+    /// changing the column count re-wraps every line, which renumbers every row below the
+    /// first one that splits. Resolving the anchored logical line and character offset back to
+    /// a row maps all three exactly.
+    ///
+    /// An anchor whose logical line the change dropped off the top cannot be mapped at all,
+    /// and the pixel offset is kept as a last resort - less the rows that came off the top,
+    /// which is what the storage shrinking below the line count says came off it.
+    private func restoredOffsetY (for anchor: TopRowAnchor) -> CGFloat
+    {
+        let rowHeight = cellDimension.height
+        guard rowHeight > 0 else {
+            return anchor.offsetY
+        }
+        if let logicalLinesAboveCaret = anchor.logicalLinesAboveCaret,
+           let caret = caretLogicalPosition (),
+           let row = restoredRow (logicalLine: caret.row - logicalLinesAboveCaret,
+                                  characterOffset: anchor.characterOffset) {
+            return CGFloat (row) * rowHeight + anchor.rowFraction - adjustedContentInset.top
+        }
+        // Both `Buffer.resize` and `Buffer.changeHistorySize` trim whatever exceeds the new
+        // capacity off the top, whether or not the storage had filled up before.
+        let trimmedRows = max (0, anchor.lineCount - terminal.buffer.lines.maxLength)
+        guard trimmedRows > 0 else {
+            return anchor.offsetY
+        }
+        return anchor.offsetY - CGFloat (trimmedRows) * rowHeight
+    }
+
+    /// The caret's position with wrapping taken out, which is the reference every anchor is
+    /// measured against.
+    private func caretLogicalPosition () -> Position?
+    {
+        terminal.getWraparoundInvariantPosition (forBufferPosition: terminal.getScrollInvariantCursorPosition ())
+    }
+
+    /// The row now holding `characterOffset` characters into `logicalLine`, or the row that
+    /// line starts on when the offset itself no longer lands anywhere - a line the resize
+    /// shortened still puts the reader on the right text, one row too high at worst.
+    private func restoredRow (logicalLine: Int, characterOffset: Int) -> Int?
+    {
+        guard logicalLine >= 0 else {
+            return nil
+        }
+        if let position = terminal.getBufferPosition (forWraparoundInvariantPosition: Position (col: characterOffset, row: logicalLine)) {
+            return position.row
+        }
+        return terminal.getBufferPosition (forWraparoundInvariantPosition: Position (col: 0, row: logicalLine))?.row
+    }
+
+    /// Parks the viewport at the bottom of the content.
+    ///
+    /// This is the offset `ScrollAnchoring` measures anchoring against, so the follow target
+    /// and the test that decides to follow cannot drift apart. Merely keeping the caret on
+    /// screen is not enough: under a scrolling region - rows 1...24 of 25 with a status line,
+    /// say - a linefeed grows the content while the caret stays visible, the offset never
+    /// moves, and the next append would see a row-sized gap and judge the view no longer
+    /// anchored.
+    private func scrollToBottom ()
+    {
+        // Nothing has been laid out yet, so there is no bottom to park at.
+        guard bounds.height > 0 else {
+            return
+        }
+        setContentOffsetY (ScrollAnchoring.bottomOffsetY (
+            contentHeight: contentSize.height,
+            viewportHeight: bounds.height,
+            topInset: adjustedContentInset.top,
+            bottomInset: adjustedContentInset.bottom))
+    }
+
+    /// Forgets the banked rows, for the paths that land somewhere nothing is owed against.
+    private func clearBankedTrimmedRows ()
+    {
+        deferredTrimmedRows = 0
+        deferredTrimOffsetY = nil
+    }
+
+    /// Hands the trims the tracker is still holding to whoever will compensate for them, so
+    /// that re-baselining the tracker across a geometry change cannot throw them away.
+    ///
+    /// ``followOutput()`` returns without consuming anything while a synchronized-output block
+    /// is open - the block paints one atomic frame when it completes - so the tracker can be
+    /// holding a whole block's worth of trims by the time a resize or a scrollback change
+    /// arrives. Those rows are not on screen yet and nothing here can compensate for them;
+    /// banking them leaves the block's completion to apply them against the frame it paints.
+    private func bankOutstandingTrimmedRows ()
+    {
+        let trimmedRows = consumeTrimmedRows ()
+        guard trimmedRows > 0 else {
+            return
+        }
+        deferredTrimmedRows += trimmedRows
+        deferredTrimOffsetY = contentOffset.y
+        // A block's completion applies the bank itself; without one, only the settle poll
+        // will close the loop.
+        if !terminal.synchronizedOutputActive && !inSyncSequence {
+            scheduleInteractionSettle ()
+        }
+    }
+
+    /// Cancels the content sliding up under a stationary viewport after `rows` lines came off
+    /// the top of a full scrollback.
+    private func compensateForTrimmedRows (_ rows: Int)
+    {
+        guard rows > 0 else {
+            return
+        }
+        setContentOffsetY (ScrollAnchoring.compensatedOffsetY (
+            currentOffsetY: contentOffset.y,
+            trimmedRows: rows,
+            rowHeight: cellDimension.height,
+            minimumOffsetY: -adjustedContentInset.top))
+    }
+
+    /// Reacts to output that scrolled the terminal: follow it only while the viewport is
+    /// parked at the bottom, and otherwise leave the visible rows exactly where they are.
+    ///
+    /// The decision is purely geometric because this view draws from `contentOffset`, not
+    /// from the terminal's `yDisp`, so scrolling back down to the bottom re-arms following
+    /// on its own. It deliberately does not use `Terminal.userScrolling`, which must stay
+    /// false here: that flag freezes `buffer.yDisp` away from `yBase`, and the caret math
+    /// on this platform assumes the two are equal.
+    ///
+    /// The offset is judged before the content grows, so an append is measured against the
+    /// geometry the user last saw. The caret is not: `Terminal.scroll` has already moved it by
+    /// the time it notifies, so it is read one row below where the reader last saw it - which
+    /// is the point, because a caret that has just stepped out of the visible band is exactly
+    /// what a viewport following it has to be told about.
+    func followOutput ()
+    {
+        // A synchronized-output block paints one atomic frame when it completes. Until then
+        // neither the content size nor the offset may move; the block's completion applies
+        // this same policy against the geometry recorded when it opened.
+        if terminal.synchronizedOutputActive || inSyncSequence {
+            return
+        }
+        rememberAnchoringGeometry ()
+        applyFollowPolicy (wasAnchored: isAnchoredToBottom (),
+                           caretWasVisible: isCaretVisible (),
+                           trimmedRows: consumeTrimmedRows ())
+    }
+
+    /// Grows the content to the buffer's current size and then either follows the output,
+    /// keeps the caret on screen, or holds the visible rows still against `trimmedRows`
+    /// lines lost off the top.
+    ///
+    /// - Parameters:
+    ///   - wasAnchored: Whether the viewport was parked at the bottom before this output,
+    ///     measured against the geometry the user last saw.
+    ///   - caretWasVisible: Whether the caret is on screen under that same geometry, read
+    ///     after the terminal scrolled and so already at its new row.
+    ///   - trimmedRows: Rows the scrollback dropped off the top since the last decision.
+    private func applyFollowPolicy (wasAnchored: Bool, caretWasVisible: Bool, trimmedRows: Int)
+    {
+        // A touch, and the deceleration that follows it, own the offset outright.
+        let interacting = isInteracting
+        var shouldFollow = wasAnchored
+
+        if let latchedOffsetY = pendingFollowOffsetY, !interacting {
+            // The interaction that deferred the follow has ended. Output growth never moves
+            // the offset while a gesture is in flight - that is exactly what the deferral
+            // guarantees - so an offset still sitting where it was latched means the finger
+            // only rested and following resumes. An offset that moved says nothing on its
+            // own: the gesture may equally have carried the viewport back down to the
+            // bottom, so the latch only ever adds to what the geometry already decided.
+            shouldFollow = wasAnchored || ScrollAnchoring.resumesFollowing (
+                latchedOffsetY: latchedOffsetY,
+                currentOffsetY: contentOffset.y)
+            pendingFollowOffsetY = nil
+        }
+
+        // A viewport a geometry change left showing the caret is still on the live edge, as
+        // long as nothing has moved it since.
+        var followsCaret = caretWasVisible || (caretFollowOffsetY.map {
+            ScrollAnchoring.resumesFollowing (latchedOffsetY: $0, currentOffsetY: contentOffset.y)
+        } ?? false)
+
+        if let caretLatchedOffsetY = pendingCaretFollowOffsetY, !interacting {
+            // Same reasoning as the follow latch above: a caret follow an interaction deferred
+            // is owed while the offset it was taken at still stands.
+            followsCaret = followsCaret || ScrollAnchoring.resumesFollowing (
+                latchedOffsetY: caretLatchedOffsetY,
+                currentOffsetY: contentOffset.y)
+            pendingCaretFollowOffsetY = nil
+        }
+
+        updateContentSize ()
+
+        if shouldFollow {
+            if interacting {
+                // Remember the intent, so that a finger resting at the bottom while a line
+                // arrives does not read as a deliberate scroll away from it once it lifts.
+                if pendingFollowOffsetY == nil {
+                    pendingFollowOffsetY = contentOffset.y
+                }
+                scheduleInteractionSettle ()
+                return
+            }
+            // Following lands on the bottom whatever came off the top, so nothing is owed.
+            clearBankedTrimmedRows ()
+            caretFollowOffsetY = nil
+            scrollToBottom ()
+            return
+        }
+        // Scrolled away from the bottom: a full scrollback keeps `lines.count` constant and
+        // slides the rows up underneath us, so cancel that shift to hold the view still.
+        var pendingTrimmedRows = deferredTrimmedRows + max (0, trimmedRows)
+        if interacting {
+            // The gesture, and the deceleration that follows it, animate the offset from
+            // frame to frame; writing it here would fight that animation and be overwritten
+            // by the next frame anyway. Bank the rows and settle up when the scrolling stops.
+            //
+            // A finger that has moved the content since the last banking is a new grab: the
+            // drag itself carried the view past the rows banked against the old one, and
+            // subtracting them again at settle would shift the text twice. Deceleration is not
+            // a new grab - it is the same gesture still unwinding, and its rows are still owed
+            // - so only a finger that is still down resets the bank.
+            if isTracking || isDragging, let bankedOffsetY = deferredTrimOffsetY,
+               !ScrollAnchoring.offsetIsUnmoved (latchedOffsetY: bankedOffsetY, currentOffsetY: contentOffset.y) {
+                pendingTrimmedRows = max (0, trimmedRows)
+            }
+            deferredTrimmedRows = pendingTrimmedRows
+            deferredTrimOffsetY = contentOffset.y
+            // A caret follow cannot be applied here either, and unlike a trim it may have no
+            // rows to bank: latch it so that there is deferred state for the settle to find,
+            // and the caret does not stay behind the obstruction once the finger lifts.
+            if followsCaret, pendingCaretFollowOffsetY == nil {
+                pendingCaretFollowOffsetY = contentOffset.y
+            }
+            scheduleInteractionSettle ()
+            return
+        }
+        clearBankedTrimmedRows ()
+        compensateForTrimmedRows (pendingTrimmedRows)
+        if followsCaret {
+            // Not at the bottom, but not scrolled back either: an interactive prompt whose
+            // bottom an obstruction moved away. `ensureCaretIsVisible` parks at the bottom
+            // offset, which brings the caret back and re-arms bottom anchoring by itself as
+            // soon as the content outgrows the viewport.
+            ensureCaretIsVisible ()
+            caretFollowOffsetY = contentOffset.y
+            return
+        }
+        caretFollowOffsetY = nil
+    }
+
+    /// Whether a touch, or the deceleration it handed off to, currently owns the offset.
+    private var isInteracting: Bool {
+        isTracking || isDragging || isDecelerating
+    }
+
+    /// Whether a follow, a caret follow or a trim compensation is waiting for the scroll view
+    /// to stop moving.
+    private var hasDeferredFollowState: Bool {
+        pendingFollowOffsetY != nil || pendingCaretFollowOffsetY != nil || deferredTrimmedRows > 0
+    }
+
+    /// Arranges for whatever an interaction deferred to be resolved once the scroll view
+    /// stops moving, without waiting for more output.
+    ///
+    /// Output alone cannot do this: a flick that ends after the last line has arrived would
+    /// leave the banked rows unapplied - the text visibly slid by however many lines the
+    /// scrollback trimmed - until an append that may never come. `UIScrollView` announces the
+    /// end of a gesture through its delegate, which belongs to whoever embeds this view and
+    /// must not be taken from them, so this polls the interaction flags instead, only while
+    /// there is something to settle.
+    private func scheduleInteractionSettle ()
+    {
+        guard !interactionSettleScheduled, hasDeferredFollowState else {
+            return
+        }
+        interactionSettleScheduled = true
+        DispatchQueue.main.asyncAfter (deadline: .now () + interactionSettleInterval) { [weak self] in
+            guard let self else { return }
+            self.interactionSettleScheduled = false
+            guard self.hasDeferredFollowState else { return }
+            guard !self.isInteracting else {
+                // Still moving - a drag, or the deceleration after it. Look again shortly.
+                self.scheduleInteractionSettle ()
+                return
+            }
+            self.settleDeferredFollowState ()
+        }
+    }
+
+    /// Resolves the follow that an interaction latched and the trims it banked, reaching the
+    /// same decision the next append would have.
+    func settleDeferredFollowState ()
+    {
+        guard !isInteracting else {
+            return
+        }
+        let latchedOffsetY = pendingFollowOffsetY
+        let caretLatchedOffsetY = pendingCaretFollowOffsetY
+        let bankedRows = deferredTrimmedRows
+        pendingFollowOffsetY = nil
+        pendingCaretFollowOffsetY = nil
+        clearBankedTrimmedRows ()
+        guard latchedOffsetY != nil || caretLatchedOffsetY != nil || bankedRows > 0 else {
+            return
+        }
+        // Both latches have to be read before the compensation below moves the offset.
+        let latchHeld = latchedOffsetY.map {
+            ScrollAnchoring.resumesFollowing (latchedOffsetY: $0, currentOffsetY: contentOffset.y)
+        } ?? false
+        let caretLatchHeld = caretLatchedOffsetY.map {
+            ScrollAnchoring.resumesFollowing (latchedOffsetY: $0, currentOffsetY: contentOffset.y)
+        } ?? false
+        rememberAnchoringGeometry ()
+        if isAnchoredToBottom () || latchHeld {
+            caretFollowOffsetY = nil
+            scrollToBottom ()
+            return
+        }
+        compensateForTrimmedRows (bankedRows)
+        if caretLatchHeld {
+            // The gesture only rested, and it rested on a viewport that was following the
+            // caret: bring the caret back if the output pushed it out of the visible band.
+            ensureCaretIsVisible ()
+            caretFollowOffsetY = contentOffset.y
+        }
+    }
+
+    /// Records the geometry a synchronized-output block has to be judged against.
+    ///
+    /// The block's output is only painted once it completes, so the follow decision belongs
+    /// to the geometry the user last saw - before the block opened - and the trim baseline is
+    /// reset here so the completion sees everything the block dropped off the top.
+    func synchronizedOutputBlockDidBegin ()
+    {
+        rememberAnchoringGeometry ()
+        syncBlockWasAnchored = isAnchoredToBottom ()
+        syncBlockOffsetY = contentOffset.y
+        _ = consumeTrimmedRows ()
+    }
+
+    /// Applies the follow policy to a synchronized-output block that has completed.
+    ///
+    /// Following unconditionally here would drag a reader who had scrolled back to the bottom
+    /// after every block, so the block is treated as one large append: follow when the view
+    /// was parked at the bottom as it opened, and otherwise compensate for the rows the
+    /// scrollback trimmed while it ran.
+    ///
+    /// The reader can also scroll *during* a block - output never moves the offset while one
+    /// is open, so any movement is theirs - which retires the recording: a block that opened
+    /// at the bottom and was scrolled away from is judged by where the viewport is now.
+    func synchronizedOutputBlockDidEnd ()
+    {
+        rememberAnchoringGeometry ()
+        let openedAnchored = syncBlockWasAnchored ?? false
+        let offsetHeld = syncBlockOffsetY.map {
+            ScrollAnchoring.resumesFollowing (latchedOffsetY: $0, currentOffsetY: contentOffset.y)
+        } ?? false
+        syncBlockWasAnchored = nil
+        syncBlockOffsetY = nil
+        let wasAnchored = openedAnchored && offsetHeld ? true : isAnchoredToBottom ()
+        applyFollowPolicy (wasAnchored: wasAnchored,
+                           caretWasVisible: isCaretVisible (),
+                           trimmedRows: consumeTrimmedRows ())
+    }
+
+    /// Records what the viewport is showing before the scrollback size changes.
+    ///
+    /// Shrinking the scrollback trims the excess off the top of the line storage, so the rows
+    /// slide out from under a reader who is scrolled into history: what has to survive the
+    /// change is the row at the top of the viewport, not the offset that showed it.
+    func scrollbackWillChange ()
+    {
+        rememberAnchoringGeometry ()
+        scrollbackChangeWasAnchored = isAnchoredToBottom ()
+        scrollbackChangeTopRowAnchor = captureTopRowAnchor ()
+    }
+
+    /// Called after the scrollback size changed and the terminal dropped the lines that no
+    /// longer fit.
+    ///
+    /// `Buffer.changeHistorySize` trims those lines off the top without touching `linesTop`,
+    /// exactly as a resize does, so the tracker never sees them and cannot be what puts the
+    /// rows back: the anchor taken before the change is. Its reading is taken afterwards all
+    /// the same, to re-baseline the tracker against the buffer the change left behind.
+    func scrollbackDidChange ()
+    {
+        let wasAnchored = scrollbackChangeWasAnchored ?? isAnchoredToBottom ()
+        let anchor = scrollbackChangeTopRowAnchor
+        scrollbackChangeWasAnchored = nil
+        scrollbackChangeTopRowAnchor = nil
+        updateContentSize ()
+        let previousOffsetY = anchor.map { restoredOffsetY (for: $0) } ?? contentOffset.y
+        // The anchor puts the rows back by text, which settles everything banked before it.
+        clearBankedTrimmedRows ()
+        // Whatever the tracker still holds is a synchronized-output block's trims: they are
+        // not on screen yet, so re-baselining here must hand them on rather than drop them.
+        bankOutstandingTrimmedRows ()
+        applyGeometryChange (wasAnchored: wasAnchored, previousOffsetY: previousOffsetY)
+    }
+
+    func updateContentSize ()
     {
         let displayBuffer = terminal.displayBuffer
         contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
                               height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+    }
+
+    func updateScroller ()
+    {
+        updateContentSize ()
         ensureCaretIsVisible()
     }
 
@@ -1636,7 +2330,25 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let originChanged = currentBounds.origin != lastLayoutBounds.origin
 
         if sizeChanged {
+            // Judge the viewport against the geometry it was last laid out under: the new
+            // bounds have already moved the bottom, so measuring against them would call
+            // every viewport scrolled back.
+            let wasAnchored = isAnchoredToBottom(viewportHeight: lastAnchoringViewportHeight,
+                                                 inset: lastAnchoringInset)
+            // A resize is the one event that changes which text a given offset shows, so what
+            // is preserved across it is the row at the top of the viewport, not its offset.
+            let topRowAnchor = captureTopRowAnchor()
+            // `applyGeometryChange` below supersedes the caret pin `processSizeChange` performs.
             processSizeChange(newSize: currentBounds.size)
+            // The lines a resize drops off the top never reach `linesTop`, so the tracker has
+            // nothing to compensate for here: re-baseline it now rather than let the next
+            // append see a delta that has already been accounted for. Anything it is still
+            // holding is a synchronized-output block's trims, which the anchor above did not
+            // account for and which are still owed.
+            bankOutstandingTrimmedRows()
+            rememberAnchoringGeometry()
+            applyGeometryChange(wasAnchored: wasAnchored,
+                                previousOffsetY: restoredOffsetY(for: topRowAnchor))
             updateCursorPosition()
         }
 
@@ -1663,10 +2375,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         guard didFinishSetup else { return }
         // The embedding environment can shrink the visible region by raising the bottom inset —
         // a software keyboard via the safe area, or a floating accessory via contentInset — without
-        // changing our bounds, so layoutSubviews' size-change path never runs and the caret can end
-        // up hidden behind the obstruction. Re-run the (inset-aware) caret check whenever the adjusted
-        // inset settles so the cursor stays on screen.
-        ensureCaretIsVisible()
+        // changing our bounds, so layoutSubviews' size-change path never runs. Judge the viewport
+        // against the inset it was last laid out under: one that was parked at the bottom follows
+        // the bottom as the inset moves it, and one the reader had scrolled back keeps its rows.
+        let wasAnchored = isAnchoredToBottom(viewportHeight: lastAnchoringViewportHeight,
+                                             inset: lastAnchoringInset)
+        let previousOffsetY = contentOffset.y
+        rememberAnchoringGeometry()
+        applyGeometryChange(wasAnchored: wasAnchored, previousOffsetY: previousOffsetY)
     }
 
     open override var contentOffset: CGPoint {
@@ -1681,14 +2397,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     open override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
         let pageHeight = max(bounds.height, cellDimension.height)
-        let maxOffsetY = max(0, contentSize.height - bounds.height)
+        // The same anchor following scrolls to, so a page down with the keyboard up lands on
+        // the bottom of the content rather than a row short of it.
+        let maxOffsetY = ScrollAnchoring.bottomOffsetY(contentHeight: contentSize.height,
+                                                       viewportHeight: bounds.height,
+                                                       topInset: adjustedContentInset.top,
+                                                       bottomInset: adjustedContentInset.bottom)
+        let minOffsetY = -adjustedContentInset.top
         let targetOffsetY: CGFloat
 
         switch direction {
         case .down, .right, .next:
             targetOffsetY = min(maxOffsetY, contentOffset.y + pageHeight)
         case .up, .left, .previous:
-            targetOffsetY = max(0, contentOffset.y - pageHeight)
+            targetOffsetY = max(minOffsetY, contentOffset.y - pageHeight)
         default:
             return super.accessibilityScroll(direction)
         }
