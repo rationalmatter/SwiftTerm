@@ -172,6 +172,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         set { terminal?.reflowWrappedLinesWithCursor = newValue }
     }
 
+    /// Proxies `Terminal.implicitLinkDetection`.
+    ///
+    /// Changing the options changes which ranges are underlined, so any hovered link is
+    /// dropped and the contents are redrawn.
+    public var implicitLinkDetection: Terminal.ImplicitLinkDetectionOptions {
+        get { terminal?.implicitLinkDetection ?? Terminal.ImplicitLinkDetectionOptions() }
+        set {
+            guard let terminal, terminal.implicitLinkDetection != newValue else {
+                return
+            }
+            terminal.implicitLinkDetection = newValue
+            linkHighlightRange = nil
+            terminal.updateFullScreen()
+            queuePendingDisplay()
+        }
+    }
+
     /// Controls how link tracking resolves hovered links:
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
     public var linkReporting: LinkReporting = .implicit
@@ -845,16 +862,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     @objc func singleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
+        // A tap on a link activates it regardless of focus: on a terminal that is not the
+        // first responder the tap would otherwise be consumed by focus or the keyboard.
+        if gestureRecognizer.view != nil && gestureRecognizer.state == .ended {
+            let tapHit = calculateTapHit(gesture: gestureRecognizer).grid
+            if let result = linkForClick(at: tapHit, hasCommandModifier: commandActive) {
+                terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
+                return
+            }
+        }
+
         if isFirstResponder {
             guard gestureRecognizer.view != nil else { return }
                  
             if gestureRecognizer.state != .ended {
-                return
-            }
-
-            let tapHit = calculateTapHit(gesture: gestureRecognizer).grid
-            if let result = linkForClick(at: tapHit, hasCommandModifier: commandActive) {
-                terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
                 return
             }
 
@@ -1255,7 +1276,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     private func updateLinkHighlightIfNeeded(at point: CGPoint, modifiers: UIKeyModifierFlags, force: Bool)
     {
-        if linkHighlightMode == .always || linkHighlightMode == .alwaysWithModifier {
+        if linkHighlightMode == .always || linkHighlightMode == .alwaysWithModifier || linkHighlightMode == .alwaysIncludingImplicit {
             return
         }
         let requiresModifier = linkHighlightMode == .hoverWithModifier
@@ -1272,7 +1293,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
         let hit = calculateTapHit(point: point).grid
-        let match = terminal.linkMatch(at: .buffer(hit), mode: .explicitAndImplicit)
+        let match = linkLookupMode().flatMap { terminal.linkMatch(at: .buffer(hit), mode: $0) }
         let newRange = match?.rowRanges
         if newRange != linkHighlightRange {
             let oldRange = linkHighlightRange
