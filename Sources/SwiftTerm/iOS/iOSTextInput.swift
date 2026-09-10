@@ -90,12 +90,7 @@ extension TerminalView: UITextInput {
 
     private func coerceTextRange(_ range: UITextRange) -> TextRange? {
         if let r = range as? TextRange {
-            let start = clampOffset(r.startPosition.offset)
-            let end = clampOffset(r.endPosition.offset)
-            if start == r.startPosition.offset && end == r.endPosition.offset {
-                return r
-            }
-            return TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
+            return r.clamped(to: textInputStorage)
         }
 
         guard let start = coerceTextPosition(range.start),
@@ -106,13 +101,20 @@ extension TerminalView: UITextInput {
     }
 
     /// Converts a UTF-16 range reported by the text input system into an offset
-    /// and a length in the units `textInputStorage` is indexed by. A range the
-    /// text cannot hold is clamped, and one that splits a grapheme cluster
-    /// resolves to the cluster it lands in.
+    /// and a length in the units `textInputStorage` is indexed by.
+    ///
+    /// A range the text cannot hold is clamped to it, and a bound that falls
+    /// inside a grapheme cluster rounds down to the start of that cluster: a
+    /// caret reported between a base letter and its combining mark comes back
+    /// as the position in front of the pair, never as one the storage cannot
+    /// address.
     private func storageOffsets(ofUTF16Range utf16Range: NSRange, in text: String) -> (offset: Int, length: Int) {
         let utf16Count = text.utf16.count
         let location = min(max(0, utf16Range.location), utf16Count)
         let length = min(max(0, utf16Range.length), utf16Count - location)
+        // Unreachable with the bounds above: Range(_:in:) fails only for a range
+        // the string cannot hold, and it accepts one that splits a cluster. Kept
+        // as a backstop, and the end of the text is the safe answer.
         guard let converted = Range(NSRange(location: location, length: length), in: text) else {
             return (text.count, 0)
         }
