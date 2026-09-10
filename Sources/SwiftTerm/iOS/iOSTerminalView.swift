@@ -1786,7 +1786,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         beginTextInputEdit()
 
-        let rangeToReplace = _markedTextRange ?? _selectedTextRange
+        let rangeToReplace = (_markedTextRange ?? _selectedTextRange).clamped(to: textInputStorage)
         var textToInsert = text
         if let normalized = normalizedAutoPeriodInsertionText(text, rangeToReplace: rangeToReplace, hadPendingAutoPeriodDelete: hadPendingAutoPeriodDelete) {
             textToInsert = normalized
@@ -2311,7 +2311,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         uitiLog("deleteBackward() \(textInputStateDescription())")
 
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
-        let rangeToDelete = _markedTextRange ?? _selectedTextRange
+        let rangeToDelete = (_markedTextRange ?? _selectedTextRange).clamped(to: textInputStorage)
         var rangeStartPosition = rangeToDelete.startPosition
         var rangeStartIndex = rangeStartPosition.offset
         if rangeToDelete.isEmpty {
