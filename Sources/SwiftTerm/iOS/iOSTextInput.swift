@@ -122,6 +122,28 @@ extension TerminalView: UITextInput {
                 text.distance(from: converted.lowerBound, to: converted.upperBound))
     }
 
+    /// Converts a UTF-16 offset an edit produced into a caret in the units
+    /// `textInputStorage` is indexed by, rounding a position that falls strictly
+    /// inside a grapheme cluster forward, to the end of that cluster.
+    ///
+    /// This is the opposite of the rounding `storageOffsets(ofUTF16Range:in:)`
+    /// applies, and deliberately so. Text that was just inserted can fuse with
+    /// the cluster that follows it - typing "👨\u{200D}" in front of "👩" leaves
+    /// a single cluster - and the caret belongs after what was typed, not in
+    /// front of it. A position the input system reports keeps the other policy:
+    /// nothing was typed there, and the start of the cluster is the answer that
+    /// does not move the caret past text the user never touched.
+    private func storageCaretOffset(ofUTF16Offset utf16Offset: Int, in text: String) -> Int {
+        let target = min(max(0, utf16Offset), text.utf16.count)
+        let roundedDown = storageOffsets(ofUTF16Range: NSRange(location: target, length: 0), in: text).offset
+        let clusterStart = text.index(text.startIndex, offsetBy: roundedDown)
+        guard text.utf16.distance(from: text.startIndex, to: clusterStart) < target else {
+            // The offset is a cluster boundary, so it addresses the storage as is.
+            return roundedDown
+        }
+        return min(roundedDown + 1, text.count)
+    }
+
     /// Replaces `range` of `textInputStorage` with `text` and returns the offset
     /// of the caret that follows the inserted text, measured against the storage
     /// the edit produced.
@@ -133,11 +155,15 @@ extension TerminalView: UITextInput {
     /// names a caret the storage may not hold, which is why the caret is derived
     /// from the result instead: the edit is measured in UTF-16, the unit both
     /// sides of the fusion agree on, and converted back afterwards.
+    ///
+    /// The fusion can also run the other way - the inserted text joining the
+    /// cluster that follows it - which leaves the measured offset inside a
+    /// cluster the storage cannot address at that point; the caret then goes to
+    /// the end of it, after the text the user just typed.
     func replaceInputStorage(_ range: Range<String.Index>, with text: String) -> Int {
         let caretUTF16Offset = textInputStorage[..<range.lowerBound].utf16.count + text.utf16.count
         textInputStorage.replaceSubrange(range, with: text)
-        return storageOffsets(ofUTF16Range: NSRange(location: caretUTF16Offset, length: 0),
-                              in: textInputStorage).offset
+        return storageCaretOffset(ofUTF16Offset: caretUTF16Offset, in: textInputStorage)
     }
 
     func beginTextInputEdit() {

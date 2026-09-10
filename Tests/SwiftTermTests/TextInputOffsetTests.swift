@@ -123,6 +123,36 @@ final class TextInputOffsetTests: XCTestCase {
 
         XCTAssertEqual(view.textInputStorage, "\u{0645}\u{064E}\u{0631}")
         XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.selectedTextRange!.start), 1)
+
+        view.insertText("\u{0628}")
+        XCTAssertEqual(view.textInputStorage, "\u{0645}\u{064E}\u{0628}\u{0631}",
+                       "the next keystroke follows the fused cluster")
+    }
+
+    // MARK: - Insertions that fuse with the text after them
+
+    /// The fusion also runs forward: "👨" and a zero-width joiner typed in front
+    /// of "👩" leave a single family cluster, so the caret's UTF-16 offset falls
+    /// inside a cluster the storage has no position for.  It belongs at the end
+    /// of that cluster -- the user typed into it -- and not in front of it,
+    /// which is where the marked-text converter's downward rounding would put
+    /// it, before the "👨" that was just inserted.
+    func testInsertionThatFusesWithTheFollowingClusterLandsAfterIt() {
+        let view = makeTerminalView()
+        view.insertText("👩x")
+
+        guard let documentStart = view.textRange(from: view.beginningOfDocument, to: view.beginningOfDocument) else {
+            return XCTFail("the terminal view must vend a caret range")
+        }
+        view.selectedTextRange = documentStart
+        view.insertText("👨\u{200D}")
+
+        XCTAssertEqual(view.textInputStorage, "👨\u{200D}👩x")
+        XCTAssertEqual(view.textInputStorage.count, 2, "the joiner fuses both emoji into one cluster")
+        XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.selectedTextRange!.start), 1)
+
+        view.insertText("y")
+        XCTAssertEqual(view.textInputStorage, "👨\u{200D}👩yx", "the next keystroke follows the fused cluster")
     }
 
     // MARK: - Offsets that outlive the text they were measured against
