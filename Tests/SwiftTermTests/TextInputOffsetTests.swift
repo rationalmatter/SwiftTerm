@@ -155,6 +155,58 @@ final class TextInputOffsetTests: XCTestCase {
         XCTAssertEqual(view.textInputStorage, "👨\u{200D}👩yx", "the next keystroke follows the fused cluster")
     }
 
+    // MARK: - Replacements the selection outlives
+
+    /// A replacement that ends at the caret -- autocorrect fixing the word in
+    /// front of it -- leaves the selection in place, moved by the size of the
+    /// edit.  That move is not the replacement's `Character` count when the text
+    /// fuses with the cluster in front of it: here the accent joins the "a", so
+    /// the storage does not grow, and the caret belongs between the fused
+    /// cluster and the "b" rather than at the end of the buffer.
+    func testReplaceEndingAtTheCaretKeepsItAfterTheFusedCluster() {
+        let view = makeTerminalView()
+        view.insertText("ab")
+
+        guard let caret = view.position(from: view.beginningOfDocument, offset: 1),
+              let midBuffer = view.textRange(from: caret, to: caret) else {
+            return XCTFail("the terminal view must vend a mid-buffer position")
+        }
+        view.selectedTextRange = midBuffer
+        view.replace(midBuffer, withText: "\u{0301}")
+
+        XCTAssertEqual(view.textInputStorage, "a\u{0301}b")
+        XCTAssertEqual(view.textInputStorage.count, 2, "the accent fuses with the letter before it")
+        XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.selectedTextRange!.start), 1)
+
+        view.insertText("c")
+        XCTAssertEqual(view.textInputStorage, "a\u{0301}cb", "the next keystroke follows the fused cluster")
+    }
+
+    /// The plain case the remap must leave alone: a selection that sits entirely
+    /// after the replaced range keeps its text, so it shifts by the difference
+    /// between the replacement and what it replaced, and keeps its length.
+    func testReplaceBeforeTheSelectionShiftsItByTheEdit() {
+        let view = makeTerminalView()
+        view.insertText("abcdef")
+
+        guard let selectionStart = view.position(from: view.beginningOfDocument, offset: 3),
+              let selectionEnd = view.position(from: view.beginningOfDocument, offset: 5),
+              let selected = view.textRange(from: selectionStart, to: selectionEnd),
+              let replacedEnd = view.position(from: view.beginningOfDocument, offset: 2),
+              let replaced = view.textRange(from: view.beginningOfDocument, to: replacedEnd) else {
+            return XCTFail("the terminal view must vend positions")
+        }
+        view.selectedTextRange = selected
+        view.replace(replaced, withText: "xyz")
+
+        XCTAssertEqual(view.textInputStorage, "xyzcdef")
+        guard let selection = view.selectedTextRange else {
+            return XCTFail("the terminal view must vend a selection")
+        }
+        XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: selection.start), 4)
+        XCTAssertEqual(view.offset(from: selection.start, to: selection.end), 2, "the selection keeps its length")
+    }
+
     // MARK: - Offsets that outlive the text they were measured against
 
     func testInsertTextWithStaleMarkedRangeDoesNotTrap() {

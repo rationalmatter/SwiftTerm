@@ -215,16 +215,37 @@ extension TerminalView: UITextInput {
         }
         self.send (txt: replacementText)
 
-        let insertionIndex = r.startPosition.offset
-        let caretAfterInsertion = replaceInputStorage(r.fullRange(in: textInputStorage), with: replacementText)
-        if r.endPosition.offset <= _selectedTextRange.startPosition.offset {
-            let selectionOffset = _selectedTextRange.startPosition.offset - insertionIndex
-            let newSelectionOffset = selectionOffset - r.length + replacementText.count
-            let newSelectionIndex = newSelectionOffset + insertionIndex
-            _selectedTextRange = TextRange(from: TextPosition(offset: newSelectionIndex),
-                                           to: TextPosition(offset: newSelectionIndex + _selectedTextRange.length))
+        let replacedRange = r.fullRange(in: textInputStorage)
+        let selection = _selectedTextRange.clamped(to: textInputStorage)
+
+        // A selection that starts at or after the end of the replaced range keeps
+        // its text and moves with it. How far it moves is not
+        // replacementText.count - r.length: the replacement can fuse with the
+        // cluster on either side of the seam, leaving the storage with fewer
+        // characters than that arithmetic predicts. Measure the selection in
+        // UTF-16 - the unit both sides of a fusion agree on - before the edit,
+        // and convert it back against the storage the edit produced.
+        let survivingSelection: (startUTF16: Int, lengthUTF16: Int)?
+        if r.endPosition.offset <= selection.startPosition.offset {
+            let selectionRange = selection.fullRange(in: textInputStorage)
+            let insertedEndUTF16 = textInputStorage[..<replacedRange.lowerBound].utf16.count + replacementText.utf16.count
+            survivingSelection = (
+                startUTF16: insertedEndUTF16 + textInputStorage.utf16.distance(from: replacedRange.upperBound,
+                                                                              to: selectionRange.lowerBound),
+                lengthUTF16: textInputStorage.utf16.distance(from: selectionRange.lowerBound,
+                                                             to: selectionRange.upperBound))
+        } else {
+            survivingSelection = nil
+        }
+
+        let caretAfterInsertion = replaceInputStorage(replacedRange, with: replacementText)
+        if let survivingSelection {
+            let start = storageCaretOffset(ofUTF16Offset: survivingSelection.startUTF16, in: textInputStorage)
+            let end = storageCaretOffset(ofUTF16Offset: survivingSelection.startUTF16 + survivingSelection.lengthUTF16,
+                                         in: textInputStorage)
+            _selectedTextRange = TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
                 .clamped(to: textInputStorage)
-        } else if r.startPosition.offset >= _selectedTextRange.endPosition.offset {
+        } else if r.startPosition.offset >= selection.endPosition.offset {
             // NOOP
         } else {
             let insertionEndPosition = TextPosition(offset: caretAfterInsertion)
