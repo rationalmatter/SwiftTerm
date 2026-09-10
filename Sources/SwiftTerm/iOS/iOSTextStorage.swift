@@ -61,12 +61,36 @@ class TextRange: UITextRange {
     return startPosition.offset >= endPosition.offset
   }
   
+  /// Returns this range with both offsets brought inside `baseString`.
+  ///
+  /// Three producers can name an offset the string cannot hold. The text input
+  /// system keeps positions across edits, so a range it hands back can outlive
+  /// the text it was measured against; it measures the strings we return in
+  /// UTF-16 units, while the storage is indexed by `Character`; and our own
+  /// insertion arithmetic assumes an insert adds as many characters as it has,
+  /// which is false when the inserted text fuses with the grapheme cluster in
+  /// front of it - a keystroke of Arabic harakat leaves the character count
+  /// unchanged. The first two are the text input system's model and can only be
+  /// clamped; the third is fixed at the producer (see `replaceInputStorage`),
+  /// and this remains its backstop. Clamp before an offset is turned into a
+  /// `String.Index`.
+  func clamped(to baseString: String) -> TextRange {
+    let limit = baseString.count
+    let start = min(max(0, startPosition.offset), limit)
+    let end = min(max(start, endPosition.offset), limit)
+    if start == startPosition.offset && end == endPosition.offset {
+      return self
+    }
+    return TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
+  }
+
   func fullRange(in baseString: String) -> Range<String.Index> {
-    let beginIndex = baseString.index(baseString.startIndex, offsetBy: startPosition.offset)
-    let endIndex = baseString.index(beginIndex, offsetBy: endPosition.offset - startPosition.offset)
+    let inBounds = clamped(to: baseString)
+    let beginIndex = baseString.index(baseString.startIndex, offsetBy: inBounds.startPosition.offset)
+    let endIndex = baseString.index(beginIndex, offsetBy: inBounds.length)
     return beginIndex..<endIndex
   }
-  
+
   var length: Int {
     return endPosition.offset - startPosition.offset
   }

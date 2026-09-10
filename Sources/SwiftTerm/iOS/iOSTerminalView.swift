@@ -2529,7 +2529,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         beginTextInputEdit()
 
-        let rangeToReplace = _markedTextRange ?? _selectedTextRange
+        let rangeToReplace = (_markedTextRange ?? _selectedTextRange).clamped(to: textInputStorage)
         var textToInsert = text
         if let normalized = normalizedAutoPeriodInsertionText(text, rangeToReplace: rangeToReplace, hadPendingAutoPeriodDelete: hadPendingAutoPeriodDelete) {
             textToInsert = normalized
@@ -2538,10 +2538,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             uitiLog("commitTextInput normalized:\(text.debugDescription) -> \(textToInsert.debugDescription)")
         }
 
-        let rangeStartIndex = rangeToReplace.startPosition.offset
-        textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
+        // The caret is not the start of the replaced range plus
+        // textToInsert.count: a keystroke that is a combining mark fuses with
+        // the cluster in front of it, so the storage can hold fewer characters
+        // than that arithmetic predicts. Measure it against the text the edit
+        // produced instead.
+        let insertedOffset = replaceInputStorage(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
         _markedTextRange = nil
-        let insertedPosition = TextPosition(offset: rangeStartIndex + textToInsert.count)
+        let insertedPosition = TextPosition(offset: insertedOffset)
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
         endTextInputEdit()
@@ -3054,7 +3058,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         uitiLog("deleteBackward() \(textInputStateDescription())")
 
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
-        let rangeToDelete = _markedTextRange ?? _selectedTextRange
+        let rangeToDelete = (_markedTextRange ?? _selectedTextRange).clamped(to: textInputStorage)
         var rangeStartPosition = rangeToDelete.startPosition
         var rangeStartIndex = rangeStartPosition.offset
         if rangeToDelete.isEmpty {
@@ -3067,6 +3071,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 pendingAutoPeriodDeleteWasSpace = false
                 self.sendBackspaceKey()
                 uitiLog("deleteBackward() no text to delete, sending backspace")
+
+                // A backward deletion clears the marked range and collapses the
+                // selection, and this path is no exception: a marked range left
+                // behind here outlived its text, and while one is set
+                // replace(_:withText:) returns without doing anything - dropping
+                // the dictation and autocorrect replacements that arrive through
+                // it until the next insertText. Only touch the state when it is
+                // not already clean, so a backspace at an empty buffer does not
+                // notify the input delegate for nothing.
+                let selectionIsCollapsedAtStart = _selectedTextRange.startPosition.offset == 0 &&
+                    _selectedTextRange.endPosition.offset == 0
+                if _markedTextRange != nil || !selectionIsCollapsedAtStart {
+                    beginTextInputEdit()
+                    _markedTextRange = nil
+                    _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+                    endTextInputEdit()
+                }
                 return
             }
 
@@ -3097,6 +3118,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+            .clamped(to: textInputStorage)
 
         endTextInputEdit()
     }

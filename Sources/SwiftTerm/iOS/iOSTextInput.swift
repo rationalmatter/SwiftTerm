@@ -90,12 +90,7 @@ extension TerminalView: UITextInput {
 
     private func coerceTextRange(_ range: UITextRange) -> TextRange? {
         if let r = range as? TextRange {
-            let start = clampOffset(r.startPosition.offset)
-            let end = clampOffset(r.endPosition.offset)
-            if start == r.startPosition.offset && end == r.endPosition.offset {
-                return r
-            }
-            return TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
+            return r.clamped(to: textInputStorage)
         }
 
         guard let start = coerceTextPosition(range.start),
@@ -103,6 +98,72 @@ extension TerminalView: UITextInput {
             return nil
         }
         return TextRange(from: start, to: end)
+    }
+
+    /// Converts a UTF-16 range reported by the text input system into an offset
+    /// and a length in the units `textInputStorage` is indexed by.
+    ///
+    /// A range the text cannot hold is clamped to it, and a bound that falls
+    /// inside a grapheme cluster rounds down to the start of that cluster: a
+    /// caret reported between a base letter and its combining mark comes back
+    /// as the position in front of the pair, never as one the storage cannot
+    /// address.
+    private func storageOffsets(ofUTF16Range utf16Range: NSRange, in text: String) -> (offset: Int, length: Int) {
+        let utf16Count = text.utf16.count
+        let location = min(max(0, utf16Range.location), utf16Count)
+        let length = min(max(0, utf16Range.length), utf16Count - location)
+        // Unreachable with the bounds above: Range(_:in:) fails only for a range
+        // the string cannot hold, and it accepts one that splits a cluster. Kept
+        // as a backstop, and the end of the text is the safe answer.
+        guard let converted = Range(NSRange(location: location, length: length), in: text) else {
+            return (text.count, 0)
+        }
+        return (text.distance(from: text.startIndex, to: converted.lowerBound),
+                text.distance(from: converted.lowerBound, to: converted.upperBound))
+    }
+
+    /// Converts a UTF-16 offset an edit produced into a caret in the units
+    /// `textInputStorage` is indexed by, rounding a position that falls strictly
+    /// inside a grapheme cluster forward, to the end of that cluster.
+    ///
+    /// This is the opposite of the rounding `storageOffsets(ofUTF16Range:in:)`
+    /// applies, and deliberately so. Text that was just inserted can fuse with
+    /// the cluster that follows it - typing "👨\u{200D}" in front of "👩" leaves
+    /// a single cluster - and the caret belongs after what was typed, not in
+    /// front of it. A position the input system reports keeps the other policy:
+    /// nothing was typed there, and the start of the cluster is the answer that
+    /// does not move the caret past text the user never touched.
+    private func storageCaretOffset(ofUTF16Offset utf16Offset: Int, in text: String) -> Int {
+        let target = min(max(0, utf16Offset), text.utf16.count)
+        let roundedDown = storageOffsets(ofUTF16Range: NSRange(location: target, length: 0), in: text).offset
+        let clusterStart = text.index(text.startIndex, offsetBy: roundedDown)
+        guard text.utf16.distance(from: text.startIndex, to: clusterStart) < target else {
+            // The offset is a cluster boundary, so it addresses the storage as is.
+            return roundedDown
+        }
+        return min(roundedDown + 1, text.count)
+    }
+
+    /// Replaces `range` of `textInputStorage` with `text` and returns the offset
+    /// of the caret that follows the inserted text, measured against the storage
+    /// the edit produced.
+    ///
+    /// The storage does not always grow by `text.count`: a combining mark
+    /// entered on its own - Arabic harakat, Thai and Devanagari marks, a lone
+    /// accent - fuses with the grapheme cluster in front of it, so it can leave
+    /// the character count unchanged. Arithmetic on the inserted text therefore
+    /// names a caret the storage may not hold, which is why the caret is derived
+    /// from the result instead: the edit is measured in UTF-16, the unit both
+    /// sides of the fusion agree on, and converted back afterwards.
+    ///
+    /// The fusion can also run the other way - the inserted text joining the
+    /// cluster that follows it - which leaves the measured offset inside a
+    /// cluster the storage cannot address at that point; the caret then goes to
+    /// the end of it, after the text the user just typed.
+    func replaceInputStorage(_ range: Range<String.Index>, with text: String) -> Int {
+        let caretUTF16Offset = textInputStorage[..<range.lowerBound].utf16.count + text.utf16.count
+        textInputStorage.replaceSubrange(range, with: text)
+        return storageCaretOffset(ofUTF16Offset: caretUTF16Offset, in: textInputStorage)
     }
 
     func beginTextInputEdit() {
@@ -118,7 +179,7 @@ extension TerminalView: UITextInput {
     }
 
     public func text(in range: UITextRange) -> String? {
-        guard let r = range as? TextRange else { return nil }
+        guard let r = (range as? TextRange)?.clamped(to: textInputStorage) else { return nil }
 
         if r.isEmpty {
             uitiLog("text(in:\(r)) -> \"\" \(textInputStateDescription())")
@@ -131,7 +192,7 @@ extension TerminalView: UITextInput {
     }
     
     public func replace(_ range: UITextRange, withText text: String) {
-        guard let r = range as? TextRange else { return }
+        guard let r = (range as? TextRange)?.clamped(to: textInputStorage) else { return }
 
         guard _markedTextRange == nil else { return }
         uitiLog ("replace(range:\(r), withText:\(text.debugDescription)) \(textInputStateDescription())")
@@ -154,19 +215,41 @@ extension TerminalView: UITextInput {
         }
         self.send (txt: replacementText)
 
-        let insertionIndex = r.startPosition.offset
-        textInputStorage.replaceSubrange(r.fullRange(in: textInputStorage), with: replacementText)
-        if r.endPosition.offset <= _selectedTextRange.startPosition.offset {
-            let selectionOffset = _selectedTextRange.startPosition.offset - insertionIndex
-            let newSelectionOffset = selectionOffset - r.length + replacementText.count
-            let newSelectionIndex = newSelectionOffset + insertionIndex
-            _selectedTextRange = TextRange(from: TextPosition(offset:newSelectionIndex), 
-                                            to: TextPosition(offset: newSelectionIndex + _selectedTextRange.length))
-        } else if r.startPosition.offset >= _selectedTextRange.endPosition.offset {
+        let replacedRange = r.fullRange(in: textInputStorage)
+        let selection = _selectedTextRange.clamped(to: textInputStorage)
+
+        // A selection that starts at or after the end of the replaced range keeps
+        // its text and moves with it. How far it moves is not
+        // replacementText.count - r.length: the replacement can fuse with the
+        // cluster on either side of the seam, leaving the storage with fewer
+        // characters than that arithmetic predicts. Measure the selection in
+        // UTF-16 - the unit both sides of a fusion agree on - before the edit,
+        // and convert it back against the storage the edit produced.
+        let survivingSelection: (startUTF16: Int, lengthUTF16: Int)?
+        if r.endPosition.offset <= selection.startPosition.offset {
+            let selectionRange = selection.fullRange(in: textInputStorage)
+            let insertedEndUTF16 = textInputStorage[..<replacedRange.lowerBound].utf16.count + replacementText.utf16.count
+            survivingSelection = (
+                startUTF16: insertedEndUTF16 + textInputStorage.utf16.distance(from: replacedRange.upperBound,
+                                                                              to: selectionRange.lowerBound),
+                lengthUTF16: textInputStorage.utf16.distance(from: selectionRange.lowerBound,
+                                                             to: selectionRange.upperBound))
+        } else {
+            survivingSelection = nil
+        }
+
+        let caretAfterInsertion = replaceInputStorage(replacedRange, with: replacementText)
+        if let survivingSelection {
+            let start = storageCaretOffset(ofUTF16Offset: survivingSelection.startUTF16, in: textInputStorage)
+            let end = storageCaretOffset(ofUTF16Offset: survivingSelection.startUTF16 + survivingSelection.lengthUTF16,
+                                         in: textInputStorage)
+            _selectedTextRange = TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
+                .clamped(to: textInputStorage)
+        } else if r.startPosition.offset >= selection.endPosition.offset {
             // NOOP
         } else {
-            let insertionEndPosition = TextPosition(offset:insertionIndex + replacementText.count)            
-            _selectedTextRange = TextRange(from: insertionEndPosition,  to: insertionEndPosition)
+            let insertionEndPosition = TextPosition(offset: caretAfterInsertion)
+            _selectedTextRange = TextRange(from: insertionEndPosition, to: insertionEndPosition)
         }
 
         endTextInputEdit()
@@ -212,7 +295,7 @@ extension TerminalView: UITextInput {
             return _markedTextRange
         }
         set {
-            _markedTextRange = newValue as? TextRange
+            _markedTextRange = (newValue as? TextRange)?.clamped(to: textInputStorage)
             uitiLog("markedTextRange -> \(_markedTextRange)")
         }
     }
@@ -229,27 +312,28 @@ extension TerminalView: UITextInput {
     public func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
         uitiLog("setMarkedText(\(markedText?.debugDescription ?? "nil"), selectedRange:\(selectedRange)) \(textInputStateDescription())")
 
-        let rangeToReplace = _markedTextRange ?? _selectedTextRange
+        let rangeToReplace = (_markedTextRange ?? _selectedTextRange).clamped(to: textInputStorage)
         let rangeStartPosition = rangeToReplace.startPosition
 
         beginTextInputEdit()
 
         if let newText = markedText {
             textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: newText)
-            // Figure out the new selection range
+            // Figure out the new selection range: the incoming range is measured in
+            // UTF-16 units of the marked text, the storage is indexed by Character.
             let rangeStartIndex = rangeStartPosition.offset
-            let newTextRange = Range(selectedRange, in: newText)!
-            let newTextRangeOffset = newText.distance(from: newText.startIndex, to: newTextRange.lowerBound)
-            let newTextRangeLength = newText.distance(from: newTextRange.lowerBound, to: newTextRange.upperBound)
+            let selection = storageOffsets(ofUTF16Range: selectedRange, in: newText)
 
-            let selectionStartIndex = rangeStartIndex + newTextRangeOffset
-            _markedTextRange = TextRange(from: rangeStartPosition, maxOffset: newText.count, in: textInputStorage) 
-            _selectedTextRange = TextRange(from: TextPosition(offset: selectionStartIndex), 
-                                           to: TextPosition(offset: selectionStartIndex + newTextRangeLength))
+            let selectionStartIndex = rangeStartIndex + selection.offset
+            _markedTextRange = TextRange(from: rangeStartPosition, maxOffset: newText.count, in: textInputStorage)
+            _selectedTextRange = TextRange(from: TextPosition(offset: selectionStartIndex),
+                                           to: TextPosition(offset: selectionStartIndex + selection.length))
+                .clamped(to: textInputStorage)
         } else {
             textInputStorage.removeSubrange(rangeToReplace.fullRange(in: textInputStorage))
             _markedTextRange = nil
             _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+                .clamped(to: textInputStorage)
         }
 
         endTextInputEdit()
@@ -280,6 +364,7 @@ extension TerminalView: UITextInput {
             beginTextInputEdit()
             let rangeEndPosition = previouslyMarkedRange.endPosition
             _selectedTextRange = TextRange(from: rangeEndPosition, to: rangeEndPosition)
+                .clamped(to: textInputStorage)
             _markedTextRange = nil
             endTextInputEdit()
         }        
@@ -343,7 +428,7 @@ extension TerminalView: UITextInput {
     }
     
     public func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
-        guard let r = range as? TextRange else { return [] }
+        guard let r = (range as? TextRange)?.clamped(to: textInputStorage) else { return [] }
         return [TextSelectionRect(rect: bounds, range: r, string: textInputStorage)]
     }
     
@@ -368,12 +453,12 @@ extension TerminalView: UITextInput {
     }
 
     public func characterRange(byExtending position: UITextPosition, in direction: UITextLayoutDirection) -> UITextRange? {
-        guard let p = position as? TextPosition else { return nil }
+        guard let p = coerceTextPosition(position) else { return nil }
         return TextRange(from: p, to: TextPosition(offset: textInputStorage.count))
     }
     
     public func position(within range: UITextRange, atCharacterOffset offset: Int) -> UITextPosition? {
-        guard let r = range as? TextRange else { return nil }
+        guard let r = (range as? TextRange)?.clamped(to: textInputStorage) else { return nil }
         let endOffset = r.startPosition.offset + offset
         if endOffset > r.endPosition.offset {
             return nil
