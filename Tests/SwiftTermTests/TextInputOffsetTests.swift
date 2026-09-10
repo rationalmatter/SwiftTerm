@@ -14,6 +14,12 @@
 //  `String.Index`, otherwise the process traps with "String index is out of
 //  bounds" (rationalmatter/Juno#1602).
 //
+//  The other producer is ours: an insertion used to advance the caret by the
+//  `Character` count of the text that went in, which a combining mark typed as
+//  its own keystroke does not add -- it fuses with the cluster in front of it.
+//  That is how a caret one past the end is stored during ordinary Arabic
+//  typing, with no stale range involved.
+//
 
 #if os(iOS) || os(visionOS)
 import XCTest
@@ -74,6 +80,49 @@ final class TextInputOffsetTests: XCTestCase {
         XCTAssertEqual(view.textInputStorage, expected)
         XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.endOfDocument), expected.count)
         XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.selectedTextRange!.start), expected.count)
+    }
+
+    // MARK: - Insertions that fuse with the text in front of them
+
+    /// Typing م, then a fatha, then ر -- three separate keystrokes, the way
+    /// the Arabic keyboard sends them.  The fatha adds no `Character` to the
+    /// storage, so a caret derived from the inserted text's own count ends up
+    /// one past the end, and the third keystroke indexes the storage with it --
+    /// the shape the crash reports come from, with no stale range in sight.
+    func testTypingACombiningMarkKeepsTheCaretInsideTheStorage() {
+        let view = makeTerminalView()
+
+        for keystroke in ["\u{0645}", "\u{064E}", "\u{0631}"] {
+            view.insertText(keystroke)
+
+            guard let caretStart = view.selectedTextRange?.start else {
+                return XCTFail("the terminal view must vend a selection")
+            }
+            XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: caretStart),
+                           view.textInputStorage.count,
+                           "the caret must address the storage after \(keystroke.debugDescription)")
+        }
+
+        XCTAssertEqual(view.textInputStorage, "\u{0645}\u{064E}\u{0631}")
+        XCTAssertEqual(view.textInputStorage.count, 2, "the fatha fuses with the letter before it")
+    }
+
+    /// The same fusion in the middle of the buffer, where clamping to the end of
+    /// the storage would still put the caret in the wrong place: the caret
+    /// belongs after the fused cluster, not after the text that follows it.
+    func testCombiningMarkInsertedMidBufferLandsAfterTheClusterItFused() {
+        let view = makeTerminalView()
+        view.insertText("\u{0645}\u{0631}")
+
+        guard let caret = view.position(from: view.beginningOfDocument, offset: 1),
+              let midBuffer = view.textRange(from: caret, to: caret) else {
+            return XCTFail("the terminal view must vend a mid-buffer position")
+        }
+        view.selectedTextRange = midBuffer
+        view.insertText("\u{064E}")
+
+        XCTAssertEqual(view.textInputStorage, "\u{0645}\u{064E}\u{0631}")
+        XCTAssertEqual(view.offset(from: view.beginningOfDocument, to: view.selectedTextRange!.start), 1)
     }
 
     // MARK: - Offsets that outlive the text they were measured against

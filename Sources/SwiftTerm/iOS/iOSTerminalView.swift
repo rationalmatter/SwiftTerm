@@ -1795,10 +1795,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             uitiLog("commitTextInput normalized:\(text.debugDescription) -> \(textToInsert.debugDescription)")
         }
 
-        let rangeStartIndex = rangeToReplace.startPosition.offset
-        textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
+        // The caret is not the start of the replaced range plus
+        // textToInsert.count: a keystroke that is a combining mark fuses with
+        // the cluster in front of it, so the storage can hold fewer characters
+        // than that arithmetic predicts. Measure it against the text the edit
+        // produced instead.
+        let insertedOffset = replaceInputStorage(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
         _markedTextRange = nil
-        let insertedPosition = TextPosition(offset: rangeStartIndex + textToInsert.count)
+        let insertedPosition = TextPosition(offset: insertedOffset)
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
         endTextInputEdit()
@@ -2354,6 +2358,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+            .clamped(to: textInputStorage)
 
         endTextInputEdit()
     }

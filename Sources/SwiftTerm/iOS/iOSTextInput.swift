@@ -120,6 +120,24 @@ extension TerminalView: UITextInput {
                 text.distance(from: converted.lowerBound, to: converted.upperBound))
     }
 
+    /// Replaces `range` of `textInputStorage` with `text` and returns the offset
+    /// of the caret that follows the inserted text, measured against the storage
+    /// the edit produced.
+    ///
+    /// The storage does not always grow by `text.count`: a combining mark
+    /// entered on its own - Arabic harakat, Thai and Devanagari marks, a lone
+    /// accent - fuses with the grapheme cluster in front of it, so it can leave
+    /// the character count unchanged. Arithmetic on the inserted text therefore
+    /// names a caret the storage may not hold, which is why the caret is derived
+    /// from the result instead: the edit is measured in UTF-16, the unit both
+    /// sides of the fusion agree on, and converted back afterwards.
+    func replaceInputStorage(_ range: Range<String.Index>, with text: String) -> Int {
+        let caretUTF16Offset = textInputStorage[..<range.lowerBound].utf16.count + text.utf16.count
+        textInputStorage.replaceSubrange(range, with: text)
+        return storageOffsets(ofUTF16Range: NSRange(location: caretUTF16Offset, length: 0),
+                              in: textInputStorage).offset
+    }
+
     func beginTextInputEdit() {
         uitiLog("beginTextInputEdit \(textInputStateDescription())")
         inputDelegate?.selectionWillChange(self)
@@ -170,7 +188,7 @@ extension TerminalView: UITextInput {
         self.send (txt: replacementText)
 
         let insertionIndex = r.startPosition.offset
-        textInputStorage.replaceSubrange(r.fullRange(in: textInputStorage), with: replacementText)
+        let caretAfterInsertion = replaceInputStorage(r.fullRange(in: textInputStorage), with: replacementText)
         if r.endPosition.offset <= _selectedTextRange.startPosition.offset {
             let selectionOffset = _selectedTextRange.startPosition.offset - insertionIndex
             let newSelectionOffset = selectionOffset - r.length + replacementText.count
@@ -181,9 +199,8 @@ extension TerminalView: UITextInput {
         } else if r.startPosition.offset >= _selectedTextRange.endPosition.offset {
             // NOOP
         } else {
-            let insertionEndPosition = TextPosition(offset: insertionIndex + replacementText.count)
+            let insertionEndPosition = TextPosition(offset: caretAfterInsertion)
             _selectedTextRange = TextRange(from: insertionEndPosition, to: insertionEndPosition)
-                .clamped(to: textInputStorage)
         }
 
         endTextInputEdit()
