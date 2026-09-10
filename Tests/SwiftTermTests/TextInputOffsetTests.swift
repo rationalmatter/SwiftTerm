@@ -178,6 +178,17 @@ final class TextInputOffsetTests: XCTestCase {
         view.deleteBackward()
 
         XCTAssertEqual(view.textInputStorage, "")
+        // The marked range has to go with the deletion even on the path that
+        // has nothing to delete: replace(_:withText:) does nothing while one is
+        // set, so a leftover here swallows the next dictation or autocorrect
+        // replacement.
+        XCTAssertNil(view.markedTextRange)
+
+        guard let documentRange = view.textRange(from: view.beginningOfDocument, to: view.endOfDocument) else {
+            return XCTFail("the terminal view must vend a document range")
+        }
+        view.replace(documentRange, withText: "x")
+        XCTAssertEqual(view.textInputStorage, "x", "replace() must not be blocked by a stale marked range")
     }
 
     func testSetMarkedTextWithStaleMarkedRangeDoesNotTrap() {

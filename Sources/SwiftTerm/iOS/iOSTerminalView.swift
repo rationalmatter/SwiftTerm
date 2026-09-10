@@ -2328,6 +2328,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 pendingAutoPeriodDeleteWasSpace = false
                 self.sendBackspaceKey()
                 uitiLog("deleteBackward() no text to delete, sending backspace")
+
+                // A backward deletion clears the marked range and collapses the
+                // selection, and this path is no exception: a marked range left
+                // behind here outlived its text, and while one is set
+                // replace(_:withText:) returns without doing anything - dropping
+                // the dictation and autocorrect replacements that arrive through
+                // it until the next insertText. Only touch the state when it is
+                // not already clean, so a backspace at an empty buffer does not
+                // notify the input delegate for nothing.
+                let selectionIsCollapsedAtStart = _selectedTextRange.startPosition.offset == 0 &&
+                    _selectedTextRange.endPosition.offset == 0
+                if _markedTextRange != nil || !selectionIsCollapsedAtStart {
+                    beginTextInputEdit()
+                    _markedTextRange = nil
+                    _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+                    endTextInputEdit()
+                }
                 return
             }
 
