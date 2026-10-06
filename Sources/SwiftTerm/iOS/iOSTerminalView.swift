@@ -1730,7 +1730,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// would look like a reader scrolled back. An intact caret-follow latch says otherwise:
     /// nothing has moved this viewport since it was last judged to be on the live edge, so the
     /// caret is brought back rather than abandoned. ``ensureCaretIsVisible()`` does that by
-    /// parking at the bottom offset, which also re-arms bottom anchoring.
+    /// parking at the bottom offset, which also re-arms bottom anchoring - or, when blank rows
+    /// below the caret outnumber what the obstruction leaves visible, by putting the caret's
+    /// row at the bottom of the visible band.
     ///
     /// Failing that, a viewport parked at the bottom must stay parked - the change moved the
     /// bottom, and following has to move with it. A viewport the reader had scrolled back must
@@ -2083,7 +2085,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // Not at the bottom, but not scrolled back either: an interactive prompt whose
             // bottom an obstruction moved away. `ensureCaretIsVisible` parks at the bottom
             // offset, which brings the caret back and re-arms bottom anchoring by itself as
-            // soon as the content outgrows the viewport.
+            // soon as the content outgrows the viewport, unless that offset would hide the
+            // caret above the visible band.
             ensureCaretIsVisible ()
             caretFollowOffsetY = contentOffset.y
             return
@@ -3050,8 +3053,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if cellDimension.height > 0, caretTop >= visibleTop, caretTop + cellDimension.height <= visibleBottom {
             return
         }
-        let maxY = contentSize.height - bounds.height + adjustedContentInset.bottom
-        contentOffset = CGPoint(x: contentOffset.x, y: max(-adjustedContentInset.top, maxY))
+        // Prefer the content bottom, but not when the blank rows below the caret outnumber
+        // what an obstruction leaves visible: that would push the caret off the top instead.
+        let targetY = ScrollAnchoring.caretRevealOffsetY(caretTop: caretTop,
+                                                         rowHeight: cellDimension.height,
+                                                         contentHeight: contentSize.height,
+                                                         viewportHeight: bounds.height,
+                                                         topInset: adjustedContentInset.top,
+                                                         bottomInset: adjustedContentInset.bottom)
+        contentOffset = CGPoint(x: contentOffset.x, y: targetY)
     }
     
     public func deleteBackward() {

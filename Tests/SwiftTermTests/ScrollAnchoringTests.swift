@@ -183,6 +183,58 @@ final class ScrollAnchoringTests {
         #expect(!isAnchored (offsetY: bottom - fractionalRowHeight / 2 - 1, rowHeight: fractionalRowHeight))
     }
 
+    // MARK: - Caret reveal
+
+    private func caretRevealOffset (caretRow: Int, contentHeight: CGFloat? = nil, topInset: CGFloat = 0, bottomInset: CGFloat = 0, rowHeight: CGFloat? = nil) -> CGFloat {
+        let rowHeight = rowHeight ?? self.rowHeight
+        return ScrollAnchoring.caretRevealOffsetY (
+            caretTop: CGFloat (caretRow) * rowHeight,
+            rowHeight: rowHeight,
+            contentHeight: contentHeight ?? self.contentHeight,
+            viewportHeight: viewportHeight,
+            topInset: topInset,
+            bottomInset: bottomInset)
+    }
+
+    /// The row index of the content's last row.
+    private var lastRow: Int { Int (contentHeight / rowHeight) - 1 }
+
+    @Test func caretRevealOnTheLastRowParksAtTheBottom () {
+        #expect(caretRevealOffset (caretRow: lastRow) == bottomOffset ())
+        #expect(caretRevealOffset (caretRow: lastRow, bottomInset: 300) == bottomOffset (bottomInset: 300))
+        #expect(caretRevealOffset (caretRow: lastRow, topInset: 40, bottomInset: 300) == bottomOffset (topInset: 40, bottomInset: 300))
+    }
+
+    @Test func caretRevealWithFewerBlankRowsThanTheBandParksAtTheBottom () {
+        // A 300 pt keyboard leaves a 200 pt band: ten rows. Nine blank rows still fit under the caret.
+        #expect(caretRevealOffset (caretRow: lastRow - 9, bottomInset: 300) == bottomOffset (bottomInset: 300))
+    }
+
+    @Test func caretRevealWithMoreBlankRowsThanTheBandKeepsTheCaretAtTheBandBottom () {
+        // Fifteen blank rows below the caret and a ten-row band: the content bottom would show
+        // only blank rows, so the caret's row lands on the band's bottom edge instead.
+        let caretRow = lastRow - 15
+        let bottomInset: CGFloat = 300
+        let offset = caretRevealOffset (caretRow: caretRow, bottomInset: bottomInset)
+        #expect(offset < bottomOffset (bottomInset: bottomInset))
+        let caretBottom = CGFloat (caretRow + 1) * rowHeight
+        #expect(caretBottom == offset + viewportHeight - bottomInset)
+    }
+
+    @Test func caretRevealNearTheTopClampsToTheTopInset () {
+        // The first row of a tall, mostly blank terminal under a keyboard.
+        #expect(caretRevealOffset (caretRow: 0, bottomInset: 300) == 0)
+        #expect(caretRevealOffset (caretRow: 0, topInset: 40, bottomInset: 300) == -40)
+    }
+
+    @Test func caretRevealInShortContentClampsToTheTopInset () {
+        #expect(caretRevealOffset (caretRow: 2, contentHeight: 100, topInset: 40) == -40)
+    }
+
+    @Test func caretRevealWithZeroRowHeightParksAtTheBottom () {
+        #expect(caretRevealOffset (caretRow: 0, bottomInset: 300, rowHeight: 0) == bottomOffset (bottomInset: 300))
+    }
+
     // MARK: - Trim tracking
 
     private final class BufferStandIn {}
