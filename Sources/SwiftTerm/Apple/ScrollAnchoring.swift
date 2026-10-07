@@ -36,6 +36,34 @@ enum ScrollAnchoring {
         max (-topInset, contentHeight - viewportHeight + bottomInset)
     }
 
+    /// The content offset that brings an off-screen caret back into the visible band.
+    ///
+    /// The bottom offset is preferred: it is where following parks, so landing there also
+    /// re-arms bottom anchoring.  But a terminal sized for a taller band than an obstruction
+    /// such as a software keyboard leaves visible can hold more blank rows below the caret
+    /// than that band shows, and parking at the content bottom would then push the caret off
+    /// the top.  In that case the caret's row is put at the bottom of the visible band instead.
+    ///
+    /// - Parameters:
+    ///   - caretTop: Vertical position of the top of the caret's row in the content.
+    ///   - rowHeight: Height of a single terminal row.
+    ///   - contentHeight: Height of the whole content, including rows above the viewport.
+    ///   - viewportHeight: Height of the scroll view's bounds.
+    ///   - topInset: Adjusted content inset at the top.
+    ///   - bottomInset: Adjusted content inset at the bottom, e.g. a software keyboard.
+    /// - Returns: The bottom offset when the caret is visible there, otherwise the offset that
+    ///   shows the caret's row at the bottom of the visible band, never above `-topInset`.
+    static func caretRevealOffsetY (caretTop: CGFloat, rowHeight: CGFloat, contentHeight: CGFloat, viewportHeight: CGFloat, topInset: CGFloat, bottomInset: CGFloat) -> CGFloat
+    {
+        let bottom = bottomOffsetY (contentHeight: contentHeight, viewportHeight: viewportHeight, topInset: topInset, bottomInset: bottomInset)
+        // The visible band always reaches the content's bottom edge at the bottom offset, so
+        // the caret can only be missed there by being above the band's top.
+        guard rowHeight > 0, caretTop < bottom + topInset else {
+            return bottom
+        }
+        return max (-topInset, caretTop + rowHeight - (viewportHeight - bottomInset))
+    }
+
     /// Whether a follow that was latched when a touch began should resume now that the
     /// interaction has ended.
     ///
