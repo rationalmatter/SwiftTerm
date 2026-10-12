@@ -119,5 +119,51 @@ final class AccessibilityPageContentTests: XCTestCase {
         XCTAssertEqual(lastLine, line(lineCount))
         XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last + 1 + overshootRows)?.string, lastLine)
     }
+
+    // MARK: - Synchronized output
+
+    /// Opens a synchronized-output block and switches to the alternate screen
+    /// inside it. The display buffer stays frozen on the normal screen and its
+    /// scrollback, while the live buffer is now the alternate screen, which is
+    /// only as tall as the view.
+    private func enterAlternateScreenDuringSynchronizedOutput(_ view: TerminalView) {
+        let displayedRows = view.terminal.displayBuffer.lines.count
+
+        view.feed(text: "\u{1b}[?2026h\u{1b}[?1049h")
+
+        XCTAssertTrue(view.terminal.synchronizedOutputActive)
+        XCTAssertEqual(view.terminal.displayBuffer.lines.count, displayedRows, "the display buffer must stay frozen")
+        XCTAssertLessThan(view.terminal.buffer.lines.count, displayedRows, "the live buffer must be shorter than the display")
+    }
+
+    /// Line numbers are rows of the display buffer the content is laid out
+    /// from, so the last displayed row is read even when the live buffer
+    /// holds fewer rows.
+    func testLineNumberReadsTheDisplayBufferDuringSynchronizedOutput() {
+        let view = makeTerminalView()
+        let last = lastRow(of: view)
+
+        enterAlternateScreenDuringSynchronizedOutput(view)
+
+        XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last)?.string, line(lineCount))
+        XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last + 1 + overshootRows)?.string, line(lineCount))
+        XCTAssertEqual(trimmed(view.accessibilityContent(forLineNumber: last)), line(lineCount))
+    }
+
+    /// The rows a wrapped line spans are found in the same display buffer the
+    /// text is read from, not in the live buffer's wrap flags.
+    func testWrappedLineReadsWholeFromTheDisplayBufferDuringSynchronizedOutput() {
+        let view = makeTerminalView()
+        let cols = view.terminal.cols
+        let wrapped = String(repeating: "w", count: cols + cols / 2)
+        view.feed(text: "\r\n" + wrapped)
+        let last = lastRow(of: view)
+        XCTAssertTrue(view.terminal.displayBuffer.lines[last].isWrapped, "the fixture must end in a wrapped line")
+
+        enterAlternateScreenDuringSynchronizedOutput(view)
+
+        XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last)?.string, wrapped)
+        XCTAssertEqual(trimmed(view.accessibilityContent(forLineNumber: last)), wrapped)
+    }
 }
 #endif
