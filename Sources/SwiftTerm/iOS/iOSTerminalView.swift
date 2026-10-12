@@ -3799,18 +3799,20 @@ extension TerminalView: UIAccessibilityReadingContent {
         return Int(floor(max(point.y,0) / cellDimension.height))
     }
     
-    func startingLine(forLineNumber lineNumber: Int) -> Int {
-        let lineWidth = terminal.buffer.lines[lineNumber].count
+    /// The first row of the logical line `lineNumber` belongs to. `buffer` must be the
+    /// buffer the caller reads the text from, so the wrap flags and the text agree.
+    func startingLine(forLineNumber lineNumber: Int, in buffer: Buffer) -> Int {
+        let lineWidth = buffer.lines[lineNumber].count
         var startingLine = lineNumber
         while startingLine >= 1 {
             startingLine -= 1
-            if terminal.buffer.lines[startingLine + 1].isWrapped {
+            if buffer.lines[startingLine + 1].isWrapped {
                 continue
             }
             let start = Position(col: 0, row: startingLine)
-            let end = Position(col: terminal.buffer.lines[startingLine].count, row: startingLine)
-            let text =  terminal.getDisplayText(start: start, end: end)
-            if (text.count != terminal.buffer.lines[startingLine].count || text.last != " ") {
+            let end = Position(col: buffer.lines[startingLine].count, row: startingLine)
+            let text =  terminal.getText(start: start, end: end, buffer: buffer)
+            if (text.count != buffer.lines[startingLine].count || text.last != " ") {
                 // previous line is incomplete. Don't use it
                 startingLine += 1
                 break
@@ -3819,15 +3821,17 @@ extension TerminalView: UIAccessibilityReadingContent {
         return startingLine
     }
 
-    func endingLine(forLineNumber lineNumber: Int) -> Int {
-        let lineWidth = terminal.buffer.lines[lineNumber].count
+    /// The last row of the logical line `lineNumber` belongs to, read from `buffer`
+    /// like `startingLine(forLineNumber:in:)`.
+    func endingLine(forLineNumber lineNumber: Int, in buffer: Buffer) -> Int {
+        let lineWidth = buffer.lines[lineNumber].count
         var endingLine = lineNumber
-        while (endingLine < terminal.buffer.lines.count - 1) {
+        while (endingLine < buffer.lines.count - 1) {
             let start = Position(col: 0, row: endingLine)
-            let end = Position(col: terminal.buffer.lines[endingLine].count, row: endingLine)
-            let text =  terminal.getDisplayText(start: start, end: end)
-            if (text.count != terminal.buffer.lines[endingLine].count || text.last != " ")
-            && !terminal.buffer.lines[endingLine + 1].isWrapped {
+            let end = Position(col: buffer.lines[endingLine].count, row: endingLine)
+            let text =  terminal.getText(start: start, end: end, buffer: buffer)
+            if (text.count != buffer.lines[endingLine].count || text.last != " ")
+            && !buffer.lines[endingLine + 1].isWrapped {
                 // this line is incomplete. We stop here.
                 break
             }
@@ -3837,10 +3841,16 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 
     public func accessibilityContent(forLineNumber lineNumber: Int) -> String? {
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
+        // Line numbers are rows of the display buffer, which getDisplayText reads, so the
+        // line number is clamped to it like accessibilityAttributedContent(forLineNumber:).
+        let buffer = terminal.displayBuffer
+        guard let lineNumber = accessibilityClampedRow(lineNumber, in: buffer) else {
+            return ""
+        }
+        var startingLine = startingLine(forLineNumber: lineNumber, in: buffer)
+        var endingLine = endingLine(forLineNumber: lineNumber, in: buffer)
         let start = Position(col: 0, row: startingLine)
-        let end = Position(col: terminal.buffer.lines[endingLine].count,
+        let end = Position(col: buffer.lines[endingLine].count,
                            row: endingLine)
         var text =  terminal.getDisplayText(start: start, end: end)
         return terminal.getDisplayText(start: start, end: end)
@@ -3849,12 +3859,18 @@ extension TerminalView: UIAccessibilityReadingContent {
     public func accessibilityFrame(forLineNumber lineNumber: Int) -> CGRect {
         let topVisibleLine = Int(contentOffset.y/cellDimension.height)
         let offset = contentOffset.y - CGFloat(topVisibleLine) * cellDimension.height
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
+        // Clamped to the display buffer like the content accessors, so a line number
+        // outside it frames the row whose text they read.
+        let buffer = terminal.displayBuffer
+        guard let lineNumber = accessibilityClampedRow(lineNumber, in: buffer) else {
+            return .zero
+        }
+        var startingLine = startingLine(forLineNumber: lineNumber, in: buffer)
+        var endingLine = endingLine(forLineNumber: lineNumber, in: buffer)
         var verticalWidth = CGFloat(endingLine - startingLine + 1)
         let lineOffset =  cellDimension.height * CGFloat (startingLine - topVisibleLine + 1)
         let lineOrigin = CGPoint(x: 0, y: lineOffset)
-        let columnCount = terminal.buffer.lines[lineNumber].count
+        let columnCount = buffer.lines[lineNumber].count
         var rect = CGRect(
             x: lineOrigin.x,
             y: lineOrigin.y + 3 - offset,
@@ -3863,33 +3879,63 @@ extension TerminalView: UIAccessibilityReadingContent {
         return rect
     }
 
-    public func accessibilityPageContent() -> String? {
+    /// Clamps a row derived from geometry or handed in by an assistive client to the
+    /// rows `buffer` holds, so it can index `buffer.lines`; nil when the buffer is empty.
+    private func accessibilityClampedRow(_ row: Int, in buffer: Buffer) -> Int? {
+        let lineCount = buffer.lines.count
+        guard lineCount > 0 else {
+            return nil
+        }
+        return min(max(row, 0), lineCount - 1)
+    }
+
+    /// The start and end positions of the page under the content offset.
+    ///
+    /// A rubber-band bounce or a safe-area or keyboard inset leaves the offset negative,
+    /// and it can still point past the content after the buffer shrank, so both rows are
+    /// clamped to the display buffer the content is laid out from and the text is read from.
+    private func accessibilityPageBounds() -> (start: Position, end: Position)? {
+        let buffer = terminal.displayBuffer
         let pageHeight = max(bounds.height, cellDimension.height)
         let lines = Int(floor(pageHeight/cellDimension.height))
-        let startLine = Int(floor(contentOffset.y / cellDimension.height))
+        guard let startLine = accessibilityClampedRow(Int(floor(contentOffset.y / cellDimension.height)), in: buffer),
+              let endLine = accessibilityClampedRow(startLine + lines, in: buffer) else {
+            return nil
+        }
         let start = Position(col: 0, row: startLine)
-        let end = Position(col: terminal.buffer.lines[startLine].count,
-                           row: startLine + lines)
-        return terminal.getDisplayText(start: start, end: end)
+        let end = Position(col: buffer.lines[startLine].count,
+                           row: endLine)
+        return (start, end)
+    }
+
+    public func accessibilityPageContent() -> String? {
+        guard let page = accessibilityPageBounds() else {
+            return ""
+        }
+        return terminal.getDisplayText(start: page.start, end: page.end)
     }
 
     public func accessibilityAttributedContent(forLineNumber lineNumber: Int) -> NSAttributedString? {
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
+        // Line numbers are rows of the display buffer, which the text is read from, so the
+        // line number is clamped to it and its wrapped rows are found in it. During a
+        // synchronized-output block the live buffer can hold fewer or other rows.
+        let buffer = terminal.displayBuffer
+        guard let lineNumber = accessibilityClampedRow(lineNumber, in: buffer) else {
+            return NSAttributedString(string: "")
+        }
+        var startingLine = startingLine(forLineNumber: lineNumber, in: buffer)
+        var endingLine = endingLine(forLineNumber: lineNumber, in: buffer)
         var start = Position(col: 0, row: startingLine)
-        var end = Position(col: terminal.buffer.lines[endingLine].count,
+        var end = Position(col: buffer.lines[endingLine].count,
                            row: endingLine)
         return accessibilityAttributedDisplayText(start: start, end: end)
     }
 
     public func accessibilityAttributedPageContent() -> NSAttributedString? {
-        let pageHeight = max(bounds.height, cellDimension.height)
-        let lines = Int(floor(pageHeight/cellDimension.height))
-        let startLine = Int(floor(contentOffset.y / cellDimension.height))
-        let start = Position(col: 0, row: startLine)
-        let end = Position(col: terminal.buffer.lines[startLine].count,
-                           row: startLine + lines)
-        return accessibilityAttributedDisplayText(start: start, end: end)
+        guard let page = accessibilityPageBounds() else {
+            return NSAttributedString(string: "")
+        }
+        return accessibilityAttributedDisplayText(start: page.start, end: page.end)
     }
 }
 
