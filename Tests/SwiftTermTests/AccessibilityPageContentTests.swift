@@ -120,6 +120,64 @@ final class AccessibilityPageContentTests: XCTestCase {
         XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last + 1 + overshootRows)?.string, lastLine)
     }
 
+    // MARK: - Plain content and frame by line number
+
+    /// In-range line numbers read their own row, and their frames are one row
+    /// tall, as wide as the line, and one row further down per line number.
+    func testPlainContentAndFrameOfAnInRangeLineNumber() {
+        let view = makeTerminalView()
+        scroll(view, toRow: 0)
+        let row = 10
+        let cell = view.cellDimension
+
+        XCTAssertEqual(trimmed(view.accessibilityContent(forLineNumber: row)), line(row + 1))
+
+        let first = view.accessibilityFrame(forLineNumber: 0)
+        let frame = view.accessibilityFrame(forLineNumber: row)
+        XCTAssertEqual(first.size, CGSize(width: CGFloat(view.terminal.cols) * cell.width, height: cell.height))
+        XCTAssertEqual(frame.size, first.size)
+        XCTAssertEqual(frame.minX, first.minX)
+        XCTAssertEqual(frame.minY, first.minY + CGFloat(row) * cell.height, accuracy: 0.001)
+    }
+
+    func testPlainContentForNegativeLineNumberReadsTheFirstLine() {
+        let view = makeTerminalView()
+
+        let first = view.accessibilityContent(forLineNumber: 0)
+        XCTAssertEqual(trimmed(first), line(1))
+        for row in [-1, -overshootRows] {
+            XCTAssertEqual(view.accessibilityContent(forLineNumber: row), first)
+        }
+    }
+
+    func testPlainContentForLineNumberPastTheEndReadsTheLastLine() {
+        let view = makeTerminalView()
+        let last = lastRow(of: view)
+
+        let lastLine = view.accessibilityContent(forLineNumber: last)
+        XCTAssertEqual(trimmed(lastLine), line(lineCount))
+        XCTAssertEqual(view.accessibilityContent(forLineNumber: last + 1 + overshootRows), lastLine)
+    }
+
+    func testFrameForNegativeLineNumberIsTheFirstLinesFrame() {
+        let view = makeTerminalView()
+        scroll(view, toRow: 0)
+
+        let first = view.accessibilityFrame(forLineNumber: 0)
+        for row in [-1, -overshootRows] {
+            XCTAssertEqual(view.accessibilityFrame(forLineNumber: row), first)
+        }
+    }
+
+    func testFrameForLineNumberPastTheEndIsTheLastLinesFrame() {
+        let view = makeTerminalView()
+        let last = lastRow(of: view)
+        scroll(view, toRow: CGFloat(last))
+
+        XCTAssertEqual(view.accessibilityFrame(forLineNumber: last + 1 + overshootRows),
+                       view.accessibilityFrame(forLineNumber: last))
+    }
+
     // MARK: - Synchronized output
 
     /// Opens a synchronized-output block and switches to the alternate screen
@@ -148,6 +206,9 @@ final class AccessibilityPageContentTests: XCTestCase {
         XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last)?.string, line(lineCount))
         XCTAssertEqual(view.accessibilityAttributedContent(forLineNumber: last + 1 + overshootRows)?.string, line(lineCount))
         XCTAssertEqual(trimmed(view.accessibilityContent(forLineNumber: last)), line(lineCount))
+        XCTAssertEqual(trimmed(view.accessibilityContent(forLineNumber: last + 1 + overshootRows)), line(lineCount))
+        XCTAssertEqual(view.accessibilityFrame(forLineNumber: last + 1 + overshootRows),
+                       view.accessibilityFrame(forLineNumber: last))
     }
 
     /// The rows a wrapped line spans are found in the same display buffer the

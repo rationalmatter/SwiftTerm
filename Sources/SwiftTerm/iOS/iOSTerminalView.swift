@@ -3841,8 +3841,12 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 
     public func accessibilityContent(forLineNumber lineNumber: Int) -> String? {
-        // Line numbers are rows of the display buffer, which getDisplayText reads.
+        // Line numbers are rows of the display buffer, which getDisplayText reads, so the
+        // line number is clamped to it like accessibilityAttributedContent(forLineNumber:).
         let buffer = terminal.displayBuffer
+        guard let lineNumber = accessibilityClampedRow(lineNumber, in: buffer) else {
+            return ""
+        }
         var startingLine = startingLine(forLineNumber: lineNumber, in: buffer)
         var endingLine = endingLine(forLineNumber: lineNumber, in: buffer)
         let start = Position(col: 0, row: startingLine)
@@ -3855,7 +3859,12 @@ extension TerminalView: UIAccessibilityReadingContent {
     public func accessibilityFrame(forLineNumber lineNumber: Int) -> CGRect {
         let topVisibleLine = Int(contentOffset.y/cellDimension.height)
         let offset = contentOffset.y - CGFloat(topVisibleLine) * cellDimension.height
+        // Clamped to the display buffer like the content accessors, so a line number
+        // outside it frames the row whose text they read.
         let buffer = terminal.displayBuffer
+        guard let lineNumber = accessibilityClampedRow(lineNumber, in: buffer) else {
+            return .zero
+        }
         var startingLine = startingLine(forLineNumber: lineNumber, in: buffer)
         var endingLine = endingLine(forLineNumber: lineNumber, in: buffer)
         var verticalWidth = CGFloat(endingLine - startingLine + 1)
